@@ -1,5 +1,7 @@
 package godb
 
+import "fmt"
+
 //BufferPool provides methods to cache pages that have been read from disk.
 //It has a fixed capacity to limit the total amount of memory used by GoDB.
 //It is also the primary way in which transactions are enforced, by using page
@@ -14,19 +16,22 @@ const (
 )
 
 type BufferPool struct {
-	// TODO: some code goes here
+	pages    map[heapHash]*Page
+	numPages int
 }
 
 // Create a new BufferPool with the specified number of pages
 func NewBufferPool(numPages int) *BufferPool {
-	// TODO: some code goes here
-	return &BufferPool{}
+	return &BufferPool{pages: make(map[heapHash]*Page, 0), numPages: numPages}
 }
 
 // Testing method -- iterate through all pages in the buffer pool
 // and call [Page.flushPage] on them. Does not need to be thread/transaction safe
 func (bp *BufferPool) FlushAllPages() {
-	// TODO: some code goes here
+	for _, page := range bp.pages {
+		dbfile := (*page).getFile()
+		(*dbfile).flushPage(page)
+	}
 }
 
 // Abort the transaction, releasing locks. Because GoDB is FORCE/NO STEAL, none
@@ -50,6 +55,25 @@ func (bp *BufferPool) BeginTransaction(tid TransactionID) error {
 	return nil
 }
 
+func (bp *BufferPool) EvictPage() error {
+	for k, v := range bp.pages {
+		if !((*v).isDirty()) {
+			delete(bp.pages, k)
+			return nil
+		}
+	}
+
+	// We didn't find any non-dirty pages
+	for _, v := range bp.pages {
+		// We now this page is dirty
+		file := (*v).getFile()
+		(*file).flushPage(v)
+		return nil
+	}
+
+	return GoDBError{BufferPoolFullError, fmt.Sprintf("Buffer pool full of dirty pages - cannot evict page")}
+}
+
 // Retrieve the specified page from the specified DBFile (e.g., a HeapFile), on
 // behalf of the specified transaction. If a page is not cached in the buffer pool,
 // you can read it from disk uing [DBFile.readPage]. If the buffer pool is full (i.e.,
@@ -62,6 +86,26 @@ func (bp *BufferPool) BeginTransaction(tid TransactionID) error {
 // one of the transactions in the deadlock]. You will likely want to store a list
 // of pages in the BufferPool in a map keyed by the [DBFile.pageKey].
 func (bp *BufferPool) GetPage(file DBFile, pageNo int, tid TransactionID, perm RWPerm) (*Page, error) {
-	// TODO: some code goes here
-	return nil, nil
+	pagekey := file.pageKey(pageNo).(heapHash)
+
+	_, ok := bp.pages[pagekey]
+	if !ok {
+		// Check if we have to evict a page
+		if len(bp.pages) > bp.numPages {
+			err := bp.EvictPage()
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		// Load page
+		page, err := file.readPage(pageNo)
+		if err != nil {
+			return nil, err
+		}
+
+		bp.pages[pagekey] = page
+	}
+
+	return bp.pages[pagekey], nil
 }

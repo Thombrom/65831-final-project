@@ -43,6 +43,23 @@ type TupleDesc struct {
 	Fields []FieldType
 }
 
+// Returns the number of bytes used when serializing a
+// tuple of this kind
+func (t *TupleDesc) BinarySize() int {
+	bytesUsed := 0
+
+	for _, field := range t.Fields {
+		switch field.Ftype {
+		case IntType:
+			bytesUsed += 8
+		case StringType:
+			bytesUsed += StringLength
+		}
+	}
+
+	return bytesUsed
+}
+
 // Compare two tuple descs, and return true iff
 // all of their field objects are equal and they
 // are the same length
@@ -151,8 +168,12 @@ type Tuple struct {
 	Rid    recordID //used to track the page and position this page was read from
 }
 
-type recordID interface {
+type RId struct {
+	pageNo int
+	slotNo int
 }
+
+type recordID interface{}
 
 // Serialize the contents of the tuple into a byte array Since all tuples are of
 // fixed size, this method should simply write the fields in sequential order
@@ -170,15 +191,7 @@ type recordID interface {
 // tuple.
 
 func write_int(value int64, b *bytes.Buffer) error {
-	err := binary.Write(b, binary.LittleEndian, value)
-	if err != nil {
-		return err
-	}
-
-	// int64 is 8 bytes long
-	padding := make([]byte, StringLength-8)
-	err = binary.Write(b, binary.LittleEndian, padding)
-	return err
+	return binary.Write(b, binary.LittleEndian, value)
 }
 
 func write_string(value string, b *bytes.Buffer) error {
@@ -212,11 +225,7 @@ func (t *Tuple) writeTo(b *bytes.Buffer) error {
 func read_int(b *bytes.Buffer) (int64, error) {
 	value := int64(0)
 	err := binary.Read(b, binary.LittleEndian, &value)
-	if err != nil {
-		return 0, err
-	}
-
-	return value, binary.Read(b, binary.LittleEndian, make([]byte, StringLength-8))
+	return value, err
 }
 
 func read_string(b *bytes.Buffer) (string, error) {

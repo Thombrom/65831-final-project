@@ -123,6 +123,10 @@ func TestSerializeSmallHeapFile(t *testing.T) {
 	testSerializeN(t, 2)
 }
 
+func TestSerializeMediumHeapFile(t *testing.T) {
+	testSerializeN(t, 1000)
+}
+
 func TestSerializeLargeHeapFile(t *testing.T) {
 	testSerializeN(t, 2000)
 }
