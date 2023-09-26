@@ -105,11 +105,29 @@ func (f *HeapFile) LoadFromCSV(file *os.File, hasHeader bool, sep string, skipLa
 		}
 		newT := Tuple{*f.Descriptor(), newFields, nil}
 		tid := NewTID()
-		f.bufPool.BeginTransaction(tid)
+		bp := f.bufPool
+		bp.BeginTransaction(tid)
 		f.insertTuple(&newT, tid)
+
+		// hack to force dirty pages to disk
+		// because CommitTransaction may not be implemented
+		// yet if this is called in lab 1 or 2
+		for j := 0; j < f.NumPages(); j++ {
+			pg, err := bp.GetPage(f, j, tid, ReadPerm)
+			if pg == nil || err != nil {
+				fmt.Println("page nil or error", err)
+				break
+			}
+			if (*pg).isDirty() {
+				(*f).flushPage(pg)
+				(*pg).setDirty(false)
+			}
+
+		}
+
 		//commit frequently, to avoid all pages in BP being full
 		//todo fix
-		f.bufPool.CommitTransaction(tid)
+		bp.CommitTransaction(tid)
 	}
 	return nil
 }

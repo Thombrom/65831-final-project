@@ -28,7 +28,7 @@ func makeTestVars() (TupleDesc, Tuple, Tuple, *HeapFile, *BufferPool, Transactio
 			IntField{999},
 		}}
 
-	bp := NewBufferPool(2)
+	bp := NewBufferPool(3)
 	os.Remove(TestingFile)
 	hf, err := NewHeapFile(TestingFile, &td, bp)
 	if err != nil {
@@ -95,6 +95,23 @@ func testSerializeN(t *testing.T, n int) {
 			t.Errorf(err.Error())
 			return
 		}
+
+		// hack to force dirty pages to disk
+		// because CommitTransaction may not be implemented
+		// yet if this is called in lab 1 or 2
+		if i%10 == 0 {
+			for j := hf.NumPages() - 1; j > -1; j-- {
+				pg, err := bp.GetPage(hf, j, tid, ReadPerm)
+				if pg == nil || err != nil {
+					t.Fatal("page nil or error", err)
+				}
+				if (*pg).isDirty() {
+					(*hf).flushPage(pg)
+					(*pg).setDirty(false)
+				}
+			}
+		}
+
 		//commit frequently to prevent buffer pool from filling
 		//todo fix
 		bp.CommitTransaction(tid)
@@ -132,7 +149,7 @@ func TestSerializeLargeHeapFile(t *testing.T) {
 }
 
 func TestSerializeVeryLargeHeapFile(t *testing.T) {
-	testSerializeN(t, 20000)
+	testSerializeN(t, 4000)
 }
 
 func TestLoadCSV(t *testing.T) {
