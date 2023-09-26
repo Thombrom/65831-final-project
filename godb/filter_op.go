@@ -1,6 +1,8 @@
 package godb
 
-import "golang.org/x/exp/constraints"
+import (
+	"golang.org/x/exp/constraints"
+)
 
 type Filter[T constraints.Ordered] struct {
 	op     BoolOp
@@ -48,8 +50,7 @@ func newFilter[T constraints.Ordered](constExpr Expr, op BoolOp, field Expr, chi
 
 // Return a TupleDescriptor for this filter op.
 func (f *Filter[T]) Descriptor() *TupleDesc {
-	// TODO: some code goes here
-	return nil
+	return f.child.Descriptor()
 }
 
 // Filter operator implementation. This function should iterate over
@@ -57,6 +58,48 @@ func (f *Filter[T]) Descriptor() *TupleDesc {
 // the predicate.
 // HINT: you can use the evalPred function defined in types.go to compare two values
 func (f *Filter[T]) Iterator(tid TransactionID) (func() (*Tuple, error), error) {
-	// TODO: some code goes here
-	return nil, nil
+	child_iter, err := f.child.Iterator(tid)
+	if err != nil {
+		return nil, err
+	}
+
+	exhaust := func(value *Tuple) (*Tuple, error) {
+		right, err := f.right.EvalExpr(value)
+		if err != nil {
+			return nil, err
+		}
+		rightV := f.getter(right)
+
+		left, err := f.left.EvalExpr(value)
+		if err != nil {
+			return nil, err
+		}
+		leftV := f.getter(left)
+
+		if evalPred(leftV, rightV, f.op) {
+			return value, nil
+		}
+
+		return nil, nil
+	}
+
+	return func() (*Tuple, error) {
+		for {
+			value, err := child_iter()
+
+			// Stop returning values if the child iter is exhausted
+			if value == nil || err != nil {
+				return nil, err
+			}
+
+			v, err := exhaust(value)
+			if err != nil {
+				return nil, err
+			}
+
+			if v != nil {
+				return v, nil
+			}
+		}
+	}, nil
 }

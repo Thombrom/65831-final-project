@@ -51,8 +51,7 @@ func NewStringJoin(left Operator, leftField Expr, right Operator, rightField Exp
 // the union of the fields in the descriptors of the left and right operators.
 // HINT: use the merge function you implemented for TupleDesc in lab1
 func (hj *EqualityJoin[T]) Descriptor() *TupleDesc {
-	// TODO: some code goes here
-	return nil
+	return (*hj.left).Descriptor().merge((*hj.right).Descriptor())
 }
 
 // Join operator implementation.  This function should iterate over the results
@@ -70,7 +69,60 @@ func (hj *EqualityJoin[T]) Descriptor() *TupleDesc {
 // out.  To pass this test, you will need to use something other than a nested
 // loops join.
 func (joinOp *EqualityJoin[T]) Iterator(tid TransactionID) (func() (*Tuple, error), error) {
+	outer, err := (*joinOp.left).Iterator(tid)
+	if err != nil {
+		return nil, err
+	}
+	var outer_val *Tuple = nil
 
-	// TODO: some code goes here
-	return nil, nil
+	inner := func() (*Tuple, error) { return nil, nil }
+
+	inner_cmp := func(l *Tuple, r *Tuple) (*Tuple, error) {
+		lv, err := joinOp.leftField.EvalExpr(l)
+		if err != nil {
+			return nil, err
+		}
+
+		rv, err := joinOp.rightField.EvalExpr(r)
+		if err != nil {
+			return nil, err
+		}
+
+		if joinOp.getter(lv) == joinOp.getter(rv) {
+			return joinTuples(l, r), nil
+		}
+
+		return nil, nil
+	}
+
+	return func() (*Tuple, error) {
+		for {
+			inner_val, err := inner()
+			if err != nil {
+				return nil, err
+			}
+
+			if inner_val == nil {
+				outer_val, err = outer()
+				if (outer_val == nil) || (err != nil) {
+					return nil, err
+				}
+
+				inner, err = (*joinOp.right).Iterator(tid)
+				if err != nil {
+					return nil, err
+				}
+				continue
+			}
+
+			cmp_val, err := inner_cmp(outer_val, inner_val)
+			if err != nil {
+				return nil, err
+			}
+
+			if cmp_val != nil {
+				return cmp_val, nil
+			}
+		}
+	}, nil
 }
