@@ -1,0 +1,27 @@
+Writeup for lab1
+
+1) Describe any design decisions you made. These may be minimal for Lab 1.
+
+I didn't make any big design decisions for this lab. The points where I had to choose representations,
+I picked the ones that were suggested in the handout. The one place I went a bit against the stream
+was with regard to dirty pages. As far as I am concerned, a page is dirty if it has had an insert or 
+delete and this is not reflected on disk. So it is impossible to complete this lab without flushing 
+dirty pages, as we have to scan through pages to insert tuples, and the bufferpool is rather limited.
+
+Thus, I decided, when evicting pages, to first search for non-dirty pages, and if we see a dirty page,
+flush it and then evict it. (Otherwise the bufferpool would be clogged with dirty pages)
+
+2) Discuss and justify any changes you made to the API.
+
+No changes was made to the API
+
+3) Describe any missing or incomplete elements of your code.
+
+Code is complete to the best of my knowledge
+
+4) Describe how long you spent on the lab, and whether there was anything you found particularly difficult or confusing.
+
+I spent around 7 hours on the lab, however this times was broken up over days. I initially found that
+getting an overview about how everything was supposed to work together between heap_pages, heap_files and
+the buffer pool was a little hard. But I do like the fact that I had to think a little hard about how
+things work and get my own internal representation, rather than following laid out steps

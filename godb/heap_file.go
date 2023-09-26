@@ -23,6 +23,11 @@ type HeapFile struct {
 	sync.Mutex
 	file *os.File
 	desc *TupleDesc
+
+	// Reports whether the file is continuous. If so,
+	// when inserting a tuple, we can skip all but the
+	// last page to check to insert
+	fileContinuous bool
 }
 
 // Create a HeapFile.
@@ -37,7 +42,7 @@ func NewHeapFile(fromFile string, td *TupleDesc, bp *BufferPool) (*HeapFile, err
 		return nil, err
 	}
 
-	return &HeapFile{bufPool: bp, file: file, desc: td}, nil //replace me
+	return &HeapFile{bufPool: bp, file: file, desc: td, fileContinuous: false}, nil //replace me
 }
 
 // Return the number of pages in the heap file
@@ -155,7 +160,12 @@ func (f *HeapFile) readPage(pageNo int) (*Page, error) {
 // worry about concurrent transactions modifying the Page or HeapFile.  We will
 // add support for concurrent modifications in lab 3.
 func (f *HeapFile) insertTuple(t *Tuple, tid TransactionID) error {
-	for pageNo := 0; pageNo < f.NumPages(); pageNo++ {
+	startPageno := 0
+	if f.fileContinuous {
+		startPageno = f.NumPages() - 1
+	}
+
+	for pageNo := startPageno; pageNo < f.NumPages(); pageNo++ {
 
 		page, err := f.bufPool.GetPage(f, pageNo, tid, ReadPerm)
 		if err != nil {
@@ -181,6 +191,9 @@ func (f *HeapFile) insertTuple(t *Tuple, tid TransactionID) error {
 
 	var ppage Page
 	ppage = heap_page
+
+	// The file must be continuous since we have to make a new page
+	f.fileContinuous = true
 	return f.flushPage(&ppage)
 }
 
