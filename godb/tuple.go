@@ -302,6 +302,14 @@ func (t1 *Tuple) equals(t2 *Tuple) bool {
 
 // Merge two tuples together, producing a new tuple with the fields of t2 appended to t1.
 func joinTuples(t1 *Tuple, t2 *Tuple) *Tuple {
+	if t1 == nil {
+		return t2
+	}
+
+	if t2 == nil {
+		return t1
+	}
+
 	desc := t1.Desc.merge(&t2.Desc)
 
 	fields := make([]DBValue, 0)
