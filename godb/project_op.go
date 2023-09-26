@@ -4,8 +4,8 @@ type Project struct {
 	selectFields []Expr // required fields for parser
 	outputNames  []string
 	child        Operator
-	//add additional fields here
-	// TODO: some code goes here
+
+	// Not supporting child right now
 }
 
 // Project constructor -- should save the list of selected field, child, and the child op.
@@ -14,8 +14,7 @@ type Project struct {
 // selectFields; throws error if not), distinct is for noting whether the projection reports
 // only distinct results, and child is the child operator.
 func NewProjectOp(selectFields []Expr, outputNames []string, distinct bool, child Operator) (Operator, error) {
-	// TODO: some code goes here
-	return nil, nil
+	return &Project{selectFields, outputNames, child}, nil
 }
 
 // Return a TupleDescriptor for this projection. The returned descriptor should contain
@@ -23,9 +22,14 @@ func NewProjectOp(selectFields []Expr, outputNames []string, distinct bool, chil
 // as specified in the constructor.
 // HINT: you can use expr.GetExprType() to get the field type
 func (p *Project) Descriptor() *TupleDesc {
-	// TODO: some code goes here
-	return nil
+	fields := make([]FieldType, 0)
 
+	for i := 0; i < len(p.outputNames); i++ {
+		field := FieldType{p.outputNames[i], "", p.selectFields[i].GetExprType().Ftype}
+		fields = append(fields, field)
+	}
+
+	return &TupleDesc{fields}
 }
 
 // Project operator implementation.  This function should iterate over the
@@ -35,6 +39,27 @@ func (p *Project) Descriptor() *TupleDesc {
 // distinct tuples seen so far.  Note that support for the distinct keyword is
 // optional as specified in the lab 2 assignment.
 func (p *Project) Iterator(tid TransactionID) (func() (*Tuple, error), error) {
-	// TODO: some code goes here
-	return nil, nil
+	iter, err := p.child.Iterator(tid)
+	if err != nil {
+		return nil, err
+	}
+
+	return func() (*Tuple, error) {
+		val, err := iter()
+		if err != nil || val == nil {
+			return val, err
+		}
+
+		vals := make([]DBValue, 0)
+		for _, expr := range p.selectFields {
+			tupval, err := expr.EvalExpr(val)
+			if err != nil {
+				return nil, err
+			}
+
+			vals = append(vals, tupval)
+		}
+
+		return &Tuple{*p.Descriptor(), vals, 0}, nil
+	}, nil
 }
