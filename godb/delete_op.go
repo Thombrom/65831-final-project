@@ -2,19 +2,23 @@ package godb
 
 type DeleteOp struct {
 	// TODO: some code goes here
+	file DBFile
+	op   Operator
 }
 
 // Construtor.  The delete operator deletes the records in the child
 // Operator from the specified DBFile.
 func NewDeleteOp(deleteFile DBFile, child Operator) *DeleteOp {
-	// TODO: some code goes here
-	return nil
+	return &DeleteOp{deleteFile, child}
 }
 
 // The delete TupleDesc is a one column descriptor with an integer field named "count"
 func (i *DeleteOp) Descriptor() *TupleDesc {
-	// TODO: some code goes here
-	return nil
+	ft := FieldType{"count", "", IntType}
+	fts := []FieldType{ft}
+	td := TupleDesc{}
+	td.Fields = fts
+	return &td
 
 }
 
@@ -24,7 +28,23 @@ func (i *DeleteOp) Descriptor() *TupleDesc {
 // were deleted.  Tuples should be deleted using the [DBFile.deleteTuple]
 // method.
 func (dop *DeleteOp) Iterator(tid TransactionID) (func() (*Tuple, error), error) {
-	// TODO: some code goes here
-	return nil, nil
+	count := 0
+	iter, err := dop.op.Iterator(tid)
+	if err != nil {
+		return nil, err
+	}
 
+	for tuple, err := iter(); tuple != nil || err != nil; tuple, err = iter() {
+		count += 1
+
+		err = dop.file.deleteTuple(tuple, tid)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return func() (*Tuple, error) {
+		tuple := Tuple{Desc: *(dop.Descriptor()), Fields: []DBValue{IntField{int64(count)}}, Rid: 0}
+		return &tuple, nil
+	}, nil
 }
