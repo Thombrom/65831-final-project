@@ -10,6 +10,7 @@ func CheckIfOutputMatches(f func() (*Tuple, error), ts []*Tuple) bool {
 	for {
 		t1, _ := f()
 		if t1 == nil {
+
 			break
 		}
 		//		fmt.Printf("%v\n", t1)

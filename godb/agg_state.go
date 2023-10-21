@@ -1,6 +1,8 @@
 package godb
 
-import "golang.org/x/exp/constraints"
+import (
+	"golang.org/x/exp/constraints"
+)
 
 type Number interface {
 	constraints.Integer | constraints.Float
@@ -184,6 +186,7 @@ func (a *MaxAggState[T]) AddTuple(t *Tuple) {
 	v := a.getter(value)
 
 	if !a.seen_value_yet {
+		a.seen_value_yet = true
 		a.max = v
 		return
 	}
@@ -248,16 +251,17 @@ func (a *MinAggState[T]) AddTuple(t *Tuple) {
 	v := a.getter(value)
 
 	if !a.seen_value_yet {
+		a.seen_value_yet = true
 		a.min = v
 		return
 	}
 
 	if a.expr.GetExprType().Ftype == IntType {
-		if v.(int64) > a.min.(int64) {
+		if v.(int64) < a.min.(int64) {
 			a.min = v
 		}
 	} else {
-		if v.(string) > a.min.(string) {
+		if v.(string) < a.min.(string) {
 			a.min = v
 		}
 	}

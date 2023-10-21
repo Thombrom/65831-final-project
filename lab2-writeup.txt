@@ -1,0 +1,15 @@
+1) Describe any design decisions you made, including your choice of join and aggregate operator implementation. If you used something other than a nested-loops join, describe the tradeoffs of the algorithm you chose. If you implemented support for distinct in project_op.go, describe how you implemented it
+
+I did not really make any design decisions. This lab was fairly straight forward with how it was to be implemented. I didn't do any of the other optional stuff so I just have nested loop joins and no distincts. The closure for the nested joins did get a little nasty though.
+
+I guess actually one design decision I did make was for the sorting. I decided to use the multikey sorting described on the 'sort' go page. This did take a bit of work to do
+
+2) Discuss and justify any changes you made to the API.
+No changes was made to the API
+
+3) Describe any missing or incomplete elements of your code.
+No missing elements except for optionals
+
+4) Describe how long you spent on the lab, and whether there was anything you found particularly difficult or confusing.
+I spent 4 hours on the lab
+

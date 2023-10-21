@@ -35,7 +35,8 @@ func (l *LimitOp) Iterator(tid TransactionID) (func() (*Tuple, error), error) {
 			return nil, err
 		}
 
-		limit, _ := l.limitTups.EvalExpr(tuple)
+		limit, err := l.limitTups.EvalExpr(tuple)
+		tuple.Desc = *l.Descriptor()
 		if limit.(IntField).Value > count {
 			count++
 			return tuple, nil
