@@ -442,12 +442,11 @@ func TestTupleProjectExtra(t *testing.T) {
 		{Fname: "name1", TableQualifier: "tq2", Ftype: StringType},
 	})
 
-
 	if err != nil {
 		t.Errorf("%v", err)
 	}
 
-if t2.Fields[0].(StringField).Value != "SFname1tq1" {
+	if t2.Fields[0].(StringField).Value != "SFname1tq1" {
 		t.Errorf("wrong match 0")
 	}
 

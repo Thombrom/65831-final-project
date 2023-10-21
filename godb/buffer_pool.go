@@ -56,19 +56,26 @@ func (bp *BufferPool) BeginTransaction(tid TransactionID) error {
 }
 
 func (bp *BufferPool) EvictPage() error {
+	// for k, v := range bp.pages {
+	// 	if !((*v).isDirty()) {
+	// 		delete(bp.pages, k)
+	// 		return nil
+	// 	}
+	// }
+
+	// // We didn't find any non-dirty pages
+	// for _, v := range bp.pages {
+	// 	// We now this page is dirty
+	// 	file := (*v).getFile()
+	// 	(*file).flushPage(v)
+	// 	return nil
+	// }
+
 	for k, v := range bp.pages {
 		if !((*v).isDirty()) {
 			delete(bp.pages, k)
 			return nil
 		}
-	}
-
-	// We didn't find any non-dirty pages
-	for _, v := range bp.pages {
-		// We now this page is dirty
-		file := (*v).getFile()
-		(*file).flushPage(v)
-		return nil
 	}
 
 	return GoDBError{BufferPoolFullError, fmt.Sprintf("Buffer pool full of dirty pages - cannot evict page")}
@@ -91,7 +98,7 @@ func (bp *BufferPool) GetPage(file DBFile, pageNo int, tid TransactionID, perm R
 	_, ok := bp.pages[pagekey]
 	if !ok {
 		// Check if we have to evict a page
-		if len(bp.pages) > bp.numPages {
+		if len(bp.pages) >= bp.numPages {
 			err := bp.EvictPage()
 			if err != nil {
 				return nil, err
