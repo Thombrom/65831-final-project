@@ -140,7 +140,6 @@ func (f *HeapFile) LoadFromCSV(file *os.File, hasHeader bool, sep string, skipLa
 // appropriate offset, read the bytes in, and construct a [heapPage] object, using
 // the [heapPage.initFromBuffer] method.
 func (f *HeapFile) readPage(pageNo int) (*Page, error) {
-
 	if pageNo >= f.NumPages() {
 		return nil, GoDBError{TupleNotFoundError, "PageNo out of range"}
 	}
@@ -185,7 +184,7 @@ func (f *HeapFile) insertTuple(t *Tuple, tid TransactionID) error {
 
 	for pageNo := startPageno; pageNo < f.NumPages(); pageNo++ {
 
-		page, err := f.bufPool.GetPage(f, pageNo, tid, ReadPerm)
+		page, err := f.bufPool.GetPage(f, pageNo, tid, WritePerm)
 		if err != nil {
 			return err
 		}
@@ -200,19 +199,31 @@ func (f *HeapFile) insertTuple(t *Tuple, tid TransactionID) error {
 		return nil
 	}
 
-	// No pages available, so we have to make a new page
-	heap_page := newHeapPage(f.desc, f.NumPages(), f)
-	_, err := heap_page.insertTuple(t)
+	// Create a new page and flush it
+	new_pageno := f.NumPages()
+	heap_page := newHeapPage(f.desc, new_pageno, f)
+
+	var ppage Page
+	ppage = heap_page
+	err := f.flushPage(&ppage)
 	if err != nil {
 		return err
 	}
 
-	var ppage Page
-	ppage = heap_page
+	page, err := f.bufPool.GetPage(f, new_pageno, tid, ReadPerm)
+	if err != nil {
+		return err
+	}
+
+	heap_page = (*page).(*heapPage)
+	_, err = heap_page.insertTuple(t)
+	if err != nil {
+		return err
+	}
 
 	// The file must be continuous since we have to make a new page
 	f.fileContinuous = true
-	return f.flushPage(&ppage)
+	return nil
 }
 
 // Remove the provided tuple from the HeapFile.  This method should use the
@@ -289,7 +300,7 @@ func (f *HeapFile) Iterator(tid TransactionID) (func() (*Tuple, error), error) {
 
 		pageNo = pageNo + 1
 		if pageNo < f.NumPages() {
-			page, err := f.bufPool.GetPage(f, pageNo, tid, WritePerm)
+			page, err := f.bufPool.GetPage(f, pageNo, tid, ReadPerm)
 			if err != nil {
 				return nil, err
 			}
