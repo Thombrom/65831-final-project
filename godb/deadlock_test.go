@@ -28,6 +28,7 @@ func TestReadWriteDeadlock(t *testing.T) {
 
 	for {
 		time.Sleep(POLL_INTERVAL)
+		fmt.Println("Status - 1: ", lg1Write.acquired(), ", 2: ", lg2Write.acquired(), ", err1: ", lg1Write.getError(), ", err2: ", lg2Write.getError())
 
 		if lg1Write.acquired() && lg2Write.acquired() {
 			t.Errorf("Should not both get write lock")

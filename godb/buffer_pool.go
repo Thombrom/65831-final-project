@@ -29,13 +29,14 @@ const (
 type BufferPool struct {
 	mutex    sync.Mutex
 	locks    map[heapHash]map[TransactionID]LockType
+	waitfor  map[TransactionID]map[TransactionID]bool // A transaction can wait for multiple others (think acquire write lock when multiple has read locks)
 	pages    map[heapHash]*Page
 	numPages int
 }
 
 // Create a new BufferPool with the specified number of pages
 func NewBufferPool(numPages int) *BufferPool {
-	return &BufferPool{pages: make(map[heapHash]*Page, 0), locks: make(map[heapHash]map[TransactionID]LockType, 0), numPages: numPages}
+	return &BufferPool{pages: make(map[heapHash]*Page, 0), locks: make(map[heapHash]map[TransactionID]LockType, 0), numPages: numPages, waitfor: make(map[TransactionID]map[TransactionID]bool, 0)}
 }
 
 // Testing method -- iterate through all pages in the buffer pool
@@ -69,8 +70,11 @@ func (bp *BufferPool) FinishTransaction(tid TransactionID, commit bool) {
 					if !ok {
 						continue
 					}
+
+					// Flush page. We can now mark it as non-dirty
 					dbfile := (*page).getFile()
 					(*dbfile).flushPage(page)
+					(*page).setDirty(false)
 				} else {
 					delete(bp.pages, key)
 				}
@@ -108,7 +112,6 @@ func (bp *BufferPool) CommitTransaction(tid TransactionID) {
 }
 
 func (bp *BufferPool) BeginTransaction(tid TransactionID) error {
-	// TODO: some code goes here
 	return nil
 }
 
@@ -141,6 +144,50 @@ func PermToLocktype(perm RWPerm) LockType {
 	return WriteLock
 }
 
+func (bp *BufferPool) DetectDeadlockImplL(tid TransactionID, target TransactionID, visited *map[TransactionID]bool) error {
+	if tid == target {
+		return GoDBError{DeadlockError, fmt.Sprintf("Deadlock detected")}
+	}
+
+	(*visited)[tid] = true
+
+	// If the other transaction is not waiting for anything,
+	// there is no way this could be a deadlock
+	waitfor, ok := bp.waitfor[tid]
+	if !ok {
+		return nil
+	}
+
+	for waittid := range waitfor {
+		_, ok := (*visited)[waittid]
+
+		// There is some cycle, but we're not part of this cycle
+		if ok {
+			return nil
+		}
+
+		err := bp.DetectDeadlockImplL(waittid, target, visited)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (bp *BufferPool) DetectDeadlockL(tid TransactionID) error {
+	waitfor := bp.waitfor[tid]
+	visited := make(map[TransactionID]bool, 0)
+	for waittid := range waitfor {
+		err := bp.DetectDeadlockImplL(waittid, tid, &visited)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (bp *BufferPool) WaitL() {
 	bp.mutex.Unlock()
 	time.Sleep(5 * time.Millisecond)
@@ -148,7 +195,10 @@ func (bp *BufferPool) WaitL() {
 }
 
 // Blocks until we acquire the lock.
-func (bp *BufferPool) AcquireLockL(key heapHash, tid TransactionID, perm RWPerm) {
+func (bp *BufferPool) AcquireLockL(key heapHash, tid TransactionID, perm RWPerm) error {
+	// When we exit AcquireLock we must necessarily hold the lock or be aborting
+	defer func() { delete(bp.waitfor, tid) }()
+
 start:
 	locks, ok := bp.locks[key]
 	if !ok {
@@ -157,7 +207,7 @@ start:
 		locks = make(map[TransactionID]LockType, 0)
 		bp.locks[key] = locks
 		locks[tid] = PermToLocktype(perm)
-		return
+		return nil
 	}
 
 	// There are currently somebody who has a lock on the key
@@ -171,13 +221,13 @@ start:
 
 		// If we already hold a writelock, we're good
 		if highest_lock == WriteLock {
-			return
+			return nil
 		}
 
 		// We hold a readlock, so we need to either stick to the
 		// readlock or upgrade it
 		locks[tid] = PermToLocktype(perm)
-		return
+		return nil
 	}
 
 	if ok && lockcount > 1 {
@@ -188,10 +238,23 @@ start:
 
 		if PermToLocktype(perm) == ReadLock && highest_lock == ReadLock {
 			locks[tid] = ReadLock
-			return
+			return nil
 		}
 
-		// Wait for a bit and then start over. TODO: Deadlock detection
+		// Wait for a bit and then start over. Save who we wait for
+		waitfor := make(map[TransactionID]bool, 0)
+		for k := range locks {
+			waitfor[k] = true
+		}
+		bp.waitfor[tid] = waitfor
+		err := bp.DetectDeadlockL(tid)
+		if err != nil {
+			bp.mutex.Unlock()
+			bp.AbortTransaction(tid)
+			bp.mutex.Lock()
+			return err
+		}
+
 		bp.WaitL()
 		goto start
 	}
@@ -201,12 +264,28 @@ start:
 	if !ok && lockcount > 0 {
 		if PermToLocktype(perm) == ReadLock && highest_lock == ReadLock {
 			locks[tid] = ReadLock
-			return
+			return nil
+		}
+
+		// Create dependency graph to check for deadlock
+		waitfor := make(map[TransactionID]bool, 0)
+		for k := range locks {
+			waitfor[k] = true
+		}
+		bp.waitfor[tid] = waitfor
+		err := bp.DetectDeadlockL(tid)
+		if err != nil {
+			bp.mutex.Unlock()
+			bp.AbortTransaction(tid)
+			bp.mutex.Lock()
+			return err
 		}
 
 		bp.WaitL()
 		goto start
 	}
+
+	return nil
 }
 
 // Retrieve the specified page from the specified DBFile (e.g., a HeapFile), on
@@ -224,7 +303,10 @@ func (bp *BufferPool) GetPage(file DBFile, pageNo int, tid TransactionID, perm R
 	pagekey := file.pageKey(pageNo).(heapHash)
 	bp.mutex.Lock()
 	defer bp.mutex.Unlock()
-	bp.AcquireLockL(pagekey, tid, perm)
+	err := bp.AcquireLockL(pagekey, tid, perm)
+	if err != nil {
+		return nil, err
+	}
 
 	_, ok := bp.pages[pagekey]
 	if !ok {

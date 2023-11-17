@@ -361,6 +361,7 @@ func TestAllDirtyFails(t *testing.T) {
 
 	for hf2.NumPages() < 3 { // make three dirty pages
 		hf2.insertTuple(&t1, tid2)
+		// fmt.Println("2.1")
 		if hf2.NumPages() == 0 {
 			t.Fatalf("Heap file should have at least one page after insertion.")
 		}

@@ -1,0 +1,32 @@
+Writeup for lab 3
+
+1) Describe any design decisions you made, including your choice of deadlock detection.
+
+This lab allowed for a few more design choices. Specifically, I had to make a choice for how to keep track of locks,
+as well as how to keep track of conflicts and deadlock detection. The lab also made you add mutexes, but this is not
+a very interesting part, as I just followed the guidance to the point and it worked
+
+For how to keep track of locks, I made an enum "LockType" which is Read and Write. And then in the bufferpool, I had
+a map of maps called locks. The first map is from heapHash (i.e. which page) to a map of which transactionids hold
+what type of lock. This allowed me to determine if a lock for a page could be given, if we should wait or what not.
+Waiting was implemented as a simple spinlock, that would go back and try to acquire the lock again. This was done
+using a goto statement rather than a recursive approach such as to not blow out the stack.
+
+For deadlock detection, whenever I would start waiting (spinning), I recorded the transactions that caused me to wait,
+and saved them in a structure called "waitfor". This is a map of maps (the last map acting as a set), showing which
+transactionids wait for which other transaction ids. Before actually doing the waiting, this allowed me to recursively
+check if any of the children of the graphs were waiting for the currently processed transaction and if so, I can abort
+the current transaction. 
+
+2) Discuss and justify any changes you made to the API.
+
+I made no changes to the API
+
+3) Describe any missing or incomplete elements of your code.
+
+None as far as I am aware
+
+4) Describe how long you spent on the lab, and whether there was anything you found particularly difficult or confusing.
+
+I spent about 4 hours on the lab. There wasn't anything I found particularly confusing. I'm already pretty familiar with
+go and concurrent programming (after taking the distributed systems class).

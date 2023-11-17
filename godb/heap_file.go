@@ -19,6 +19,7 @@ type HeapFile struct {
 	// TODO: some code goes here
 	// HeapFile should include the fields below;  you may want to add
 	// additional fields
+	mutex   sync.Mutex
 	bufPool *BufferPool
 	sync.Mutex
 	file *os.File
@@ -177,6 +178,9 @@ func (f *HeapFile) readPage(pageNo int) (*Page, error) {
 // worry about concurrent transactions modifying the Page or HeapFile.  We will
 // add support for concurrent modifications in lab 3.
 func (f *HeapFile) insertTuple(t *Tuple, tid TransactionID) error {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+
 	startPageno := 0
 	if f.fileContinuous {
 		startPageno = f.NumPages() - 1
@@ -234,6 +238,8 @@ func (f *HeapFile) insertTuple(t *Tuple, tid TransactionID) error {
 // so you can supply any object you wish.  You will likely want to identify the
 // heap page and slot within the page that the tuple came from.
 func (f *HeapFile) deleteTuple(t *Tuple, tid TransactionID) error {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
 	rid := t.Rid.(RId)
 
 	if rid.pageNo < 0 || rid.pageNo >= f.NumPages() {
