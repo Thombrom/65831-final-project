@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"sync"
 )
 
 type LogSequenceNumber *int
@@ -53,6 +54,8 @@ type Log struct {
 	// The offset into the log file for the last checkpoint
 	// This value is used for faster recovery
 	checkpoint_offset int64
+
+	mutex sync.Mutex
 }
 
 type PositionDescriptor struct {
@@ -67,6 +70,15 @@ type LogOperation struct {
 	pd        PositionDescriptor
 }
 
+type LogRecordMetadata struct {
+	// Filename is an empty string when optype != InsertDelete
+	filename string
+	lsn      LogSequenceNumber
+	tid      TransactionID
+	prev_lsn LogSequenceNumber
+	optype   OperationType
+}
+
 // Log records are serialized with the size of the
 // log record as the first bytes, then the string
 // encoded with the filename length as the first
@@ -74,12 +86,7 @@ type LogOperation struct {
 // length filenames, and knowing which records are
 // for which heapfiles
 type LogRecord struct {
-	// Filename is an empty string when optype != InsertDelete
-	filename string
-	lsn      LogSequenceNumber
-	tid      TransactionID
-	prev_lsn LogSequenceNumber
-	optype   OperationType
+	metadata LogRecordMetadata
 
 	// Actually redo/undo operations
 	undo *LogOperation
@@ -172,55 +179,80 @@ func newLog(fromfile string) (*Log, error) {
 	transaction_table := recover_transaction_table(fromfile)
 	checkpoint := recover_checkpoint(fromfile)
 
-	return &Log{fromfile, file, transaction_table, dirty_page_table, checkpoint}, nil
+	return &Log{fromfile, file, transaction_table, dirty_page_table, checkpoint, sync.Mutex{}}, nil
+}
+
+func (t *Log) get_dirty_page_table() *map[heapHash]LogSequenceNumber {
+	return &t.dirty_page_table
+}
+
+func (t *Log) get_transaction_table() *map[TransactionID]LogSequenceNumber {
+	return &t.transaction_table
+}
+
+func (t *LogRecordMetadata) writeTo(b *bytes.Buffer) error {
+	err := errors.Join(
+		// Record filename
+		binary.Write(b, binary.LittleEndian, int64(len(t.filename))),
+		binary.Write(b, binary.LittleEndian, []byte(t.filename)),
+
+		// Record next items
+		binary.Write(b, binary.LittleEndian, int64(*t.lsn)),
+		binary.Write(b, binary.LittleEndian, int64(*t.tid)),
+		binary.Write(b, binary.LittleEndian, int64(t.optype)),
+	)
+
+	if t.optype != LogBeginTransaction {
+		binary.Write(b, binary.LittleEndian, int64(*t.prev_lsn))
+	}
+
+	return err
 }
 
 func (t *LogRecord) writeTo(b *bytes.Buffer) error {
 	sub_buf := new(bytes.Buffer)
-
-	err := errors.Join(
-		// Record filename
-		binary.Write(sub_buf, binary.LittleEndian, int64(len(t.filename))),
-		binary.Write(sub_buf, binary.LittleEndian, []byte(t.filename)),
-
-		// Record next items
-		binary.Write(sub_buf, binary.LittleEndian, int64(*t.lsn)),
-		binary.Write(sub_buf, binary.LittleEndian, int64(*t.tid)),
-		binary.Write(sub_buf, binary.LittleEndian, int64(*t.prev_lsn)),
-		binary.Write(sub_buf, binary.LittleEndian, int64(t.optype)),
-	)
+	t.metadata.writeTo(sub_buf)
 
 	// Record undo and redo
-	if t.optype == LogInsertDelete {
-		err = errors.Join(
-			err,
+	if t.metadata.optype == LogInsertDelete {
+		err := errors.Join(
 			t.undo.writeTo(sub_buf),
 			t.redo.writeTo(sub_buf),
 		)
-	}
 
-	if err != nil {
-		return err
+		if err != nil {
+			return err
+		}
 	}
 
 	// Record the size as the first value followed by the bytes
-	err = binary.Write(b, binary.LittleEndian, int64(len(sub_buf.Bytes())))
+	err := binary.Write(b, binary.LittleEndian, int64(len(sub_buf.Bytes())+8))
 	if err != nil {
 		return err
 	}
 
 	_, err = b.Write((sub_buf.Bytes()))
+	if err != nil {
+		return err
+	}
+
+	// We also write it after the log such that we can go back in the buffer
+	err = binary.Write(b, binary.LittleEndian, int64(len(sub_buf.Bytes())+8))
 	return err
 }
 
-func (t *LogRecord) equals(other *LogRecord) bool {
-	eq := t.filename == other.filename &&
+func (t *LogRecordMetadata) equals(other *LogRecordMetadata) bool {
+	return t.filename == other.filename &&
 		*t.lsn == *other.lsn &&
 		*t.prev_lsn == *other.prev_lsn &&
 		*t.tid == *other.tid &&
 		t.optype == other.optype
+}
 
-	if t.optype == LogInsertDelete {
+func (t *LogRecord) equals(other *LogRecord) bool {
+	eq := t.metadata.equals(&other.metadata)
+
+	if t.metadata.optype == LogInsertDelete {
 		eq = eq &&
 			t.redo.equals(other.redo) &&
 			t.undo.equals(other.undo)
@@ -267,30 +299,6 @@ func read_string_log(b *bytes.Buffer, length int) (string, error) {
 	return string(value), err
 }
 
-// Assumes bytes points to the start of a serialization
-func ReadFilenameFrom(b *bytes.Buffer) (string, error) {
-	// Length is always first
-	length, err := read_int_log(b)
-	if err != nil {
-		return "", err
-	}
-
-	if length <= 4 {
-		return "", fmt.Errorf("Not long enough")
-	}
-
-	filename_length, err := read_int_log(b)
-	if err != nil {
-		return "", err
-	}
-
-	if length < filename_length+4 {
-		return "", fmt.Errorf("Filename exceeds log record")
-	}
-
-	return read_string_log(b, int(filename_length))
-}
-
 func ReadLogOperationFrom(b *bytes.Buffer, desc *TupleDesc) (*LogOperation, error) {
 	pd := &PositionDescriptor{0, 0}
 	err := binary.Read(b, binary.LittleEndian, pd)
@@ -316,25 +324,53 @@ func ReadLogOperationFrom(b *bytes.Buffer, desc *TupleDesc) (*LogOperation, erro
 	return &LogOperation{has_tuple, nil, *pd}, nil
 }
 
-func ReadLogRecordFrom(b *bytes.Buffer, desc *TupleDesc) (*LogRecord, error) {
-	filename, err := ReadFilenameFrom(b)
+func ReadLogMetadataFrom(b *bytes.Buffer) (*LogRecordMetadata, error) {
+	filename_length, err := read_int_log(b)
+	if err != nil {
+		return nil, err
+	}
+
+	filename, err := read_string_log(b, int(filename_length))
 	if err != nil {
 		return nil, err
 	}
 
 	lsn, err1 := read_int_log(b)
 	tid, err2 := read_int_log(b)
-	prev_lsn, err3 := read_int_log(b)
 	optype, err4 := read_int_log(b)
 	optype_typed := OperationType(optype)
 
-	err = errors.Join(err1, err2, err3, err4)
+	err = errors.Join(err1, err2, err4)
 	if err != nil {
 		return nil, err
 	}
 
-	if optype_typed != LogInsertDelete {
-		return &LogRecord{filename, &lsn, &tid, &prev_lsn, optype_typed, nil, nil}, nil
+	var prev_lsn LogSequenceNumber
+	if optype_typed != LogBeginTransaction {
+		prev_lsn_val, err := read_int_log(b)
+		if err != nil {
+			return nil, err
+		}
+
+		prev_lsn = &prev_lsn_val
+	}
+
+	return &LogRecordMetadata{filename, &lsn, &tid, prev_lsn, optype_typed}, nil
+}
+
+func ReadLogRecordFrom(b *bytes.Buffer, desc *TupleDesc) (*LogRecord, error) {
+	length, err := read_int_log(b)
+	if err != nil {
+		return nil, err
+	}
+
+	metadata, err := ReadLogMetadataFrom(b)
+	if err != nil {
+		return nil, err
+	}
+
+	if metadata.optype != LogInsertDelete {
+		return &LogRecord{*metadata, nil, nil}, nil
 	}
 
 	undo, err := ReadLogOperationFrom(b, desc)
@@ -347,11 +383,27 @@ func ReadLogRecordFrom(b *bytes.Buffer, desc *TupleDesc) (*LogRecord, error) {
 		return nil, err
 	}
 
-	return &LogRecord{filename, &lsn, &tid, &prev_lsn, optype_typed, undo, redo}, err
+	length_post, err := read_int_log(b)
+	if err != nil {
+		return nil, err
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	if length != length_post {
+		return nil, fmt.Errorf("Pre and post length mismatch")
+	}
+
+	return &LogRecord{*metadata, undo, redo}, nil
 }
 
 // TODO: Mutex
 func (t *Log) InsertLog(filename string, tid TransactionID, position PositionDescriptor, new_tuple *Tuple) *LogRecord {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
 	lsn := NewLSN()
 
 	heap_hash := heapHash{FileName: filename, PageNo: int(position.PageNo)}
@@ -363,10 +415,13 @@ func (t *Log) InsertLog(filename string, tid TransactionID, position PositionDes
 	prev_lsn := t.transaction_table[tid]
 	t.transaction_table[tid] = lsn
 
-	return &LogRecord{filename, lsn, tid, prev_lsn, LogInsertDelete, &LogOperation{false, nil, position}, &LogOperation{true, new_tuple, position}}
+	return &LogRecord{LogRecordMetadata{filename, lsn, tid, prev_lsn, LogInsertDelete}, &LogOperation{false, nil, position}, &LogOperation{true, new_tuple, position}}
 }
 
 func (t *Log) DeleteLog(filename string, tid TransactionID, position PositionDescriptor, prev_tuple *Tuple) *LogRecord {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
 	lsn := NewLSN()
 
 	heap_hash := heapHash{FileName: filename, PageNo: int(position.PageNo)}
@@ -378,33 +433,44 @@ func (t *Log) DeleteLog(filename string, tid TransactionID, position PositionDes
 	prev_lsn := t.transaction_table[tid]
 	t.transaction_table[tid] = lsn
 
-	return &LogRecord{filename, lsn, tid, prev_lsn, LogInsertDelete, &LogOperation{true, prev_tuple, position}, &LogOperation{false, nil, position}}
+	return &LogRecord{LogRecordMetadata{filename, lsn, tid, prev_lsn, LogInsertDelete}, &LogOperation{true, prev_tuple, position}, &LogOperation{false, nil, position}}
 }
 
-func (t *Log) BeginTransactionLog(filename string, tid TransactionID) *LogRecord {
+func (t *Log) BeginTransactionLog(tid TransactionID) *LogRecord {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
 	lsn := NewLSN()
 	t.transaction_table[tid] = lsn
 
-	return &LogRecord{filename, lsn, tid, nil, LogBeginTransaction, nil, nil}
+	return &LogRecord{LogRecordMetadata{"", lsn, tid, nil, LogBeginTransaction}, nil, nil}
 }
 
-func (t *Log) CommitTransactionLog(filename string, tid TransactionID) *LogRecord {
+func (t *Log) CommitTransactionLog(tid TransactionID) *LogRecord {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
 	lsn := NewLSN()
 	prev_lsn := t.transaction_table[tid]
 	delete(t.transaction_table, tid)
 
-	return &LogRecord{filename, lsn, tid, prev_lsn, LogCommitTransaction, nil, nil}
+	return &LogRecord{LogRecordMetadata{"", lsn, tid, prev_lsn, LogCommitTransaction}, nil, nil}
 }
 
-func (t *Log) AbortTransactionLog(filename string, tid TransactionID) *LogRecord {
+func (t *Log) AbortTransactionLog(tid TransactionID) *LogRecord {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
 	lsn := NewLSN()
 	prev_lsn := t.transaction_table[tid]
 	delete(t.transaction_table, tid)
 
-	return &LogRecord{filename, lsn, tid, prev_lsn, LogAbortTransaction, nil, nil}
+	return &LogRecord{LogRecordMetadata{"", lsn, tid, prev_lsn, LogAbortTransaction}, nil, nil}
 }
 
 func (t *Log) Append(record *LogRecord) error {
+	// File writes are atomic so no need to lock here
+
 	buf := new(bytes.Buffer)
 	record.writeTo(buf)
 
