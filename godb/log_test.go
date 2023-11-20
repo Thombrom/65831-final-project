@@ -2,6 +2,8 @@ package godb
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"os"
 	"testing"
 )
@@ -149,5 +151,63 @@ func TestLogTransactionTable(t *testing.T) {
 	_, ok := (*log.get_transaction_table())[tid]
 	if ok {
 		t.Fatalf("Transaction table for tid should be cleared")
+	}
+}
+
+func TestLogReader(t *testing.T) {
+	ClearLog()
+	_, t1, _, _, _, _ := makeTestVars()
+	log, err := newLog(TestingFileLog)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	// Add a transaction of insert then delete then abort to the log
+	tid := NewTID()
+
+	records := make([]*LogRecord, 4)
+	records[0] = log.BeginTransactionLog(tid)
+	records[1] = log.InsertLog("table.csv", tid, PositionDescriptor{0, 0}, &t1)
+	records[2] = log.DeleteLog("table.csv", tid, PositionDescriptor{0, 0}, &t1)
+	records[3] = log.AbortTransactionLog(tid)
+
+	err = errors.Join(
+		log.Append(records[0]), log.Append(records[1]), log.Append(records[2]), log.Append(records[3]),
+	)
+	if err != nil {
+		t.Fatalf("Error adding to log")
+	}
+
+	reader, err := log.CreateLogReaderAtCheckpoint()
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+	read_metadata, err := reader.ReadMetadata()
+	reader.AdvanceNext()
+	if err != nil || !read_metadata.equals(&records[0].metadata) {
+		fmt.Println(read_metadata)
+		t.Fatalf("Error in comparing read metadata, %s", err.Error())
+	}
+
+	read_metadata, err = reader.ReadMetadata()
+	reader.AdvanceNext()
+	if err != nil || !read_metadata.equals(&records[1].metadata) {
+		t.Fatalf("Error in comparing read metadata")
+	}
+
+	read_metadata, err = reader.ReadMetadata()
+	reader.AdvanceNext()
+	if err != nil || !read_metadata.equals(&records[2].metadata) {
+		t.Fatalf("Error in comparing read metadata")
+	}
+
+	read_metadata, err = reader.ReadMetadata()
+	reader.AdvanceNext()
+	if err != nil || !read_metadata.equals(&records[3].metadata) {
+		t.Fatalf("Error in comparing read metadata")
+	}
+
+	if !reader.AtEnd() {
+		t.Fatalf("Reader should be at end now")
 	}
 }

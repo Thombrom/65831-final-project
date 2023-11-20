@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"sync"
 )
@@ -170,7 +169,7 @@ func recover_checkpoint(fromfile string) int64 {
 // .dirty is the dirty page table file, the .txn is the transactions table and
 // the .chkpnt is the checkpoint table
 func newLog(fromfile string) (*Log, error) {
-	file, err := os.OpenFile(fromfile, os.O_RDWR|os.O_CREATE, fs.ModeAppend)
+	file, err := os.OpenFile(fromfile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0x744)
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +225,7 @@ func (t *LogRecord) writeTo(b *bytes.Buffer) error {
 	}
 
 	// Record the size as the first value followed by the bytes
-	err := binary.Write(b, binary.LittleEndian, int64(len(sub_buf.Bytes())+8))
+	err := binary.Write(b, binary.LittleEndian, int64(len(sub_buf.Bytes())+16))
 	if err != nil {
 		return err
 	}
@@ -237,16 +236,21 @@ func (t *LogRecord) writeTo(b *bytes.Buffer) error {
 	}
 
 	// We also write it after the log such that we can go back in the buffer
-	err = binary.Write(b, binary.LittleEndian, int64(len(sub_buf.Bytes())+8))
+	err = binary.Write(b, binary.LittleEndian, int64(len(sub_buf.Bytes())+16))
 	return err
 }
 
 func (t *LogRecordMetadata) equals(other *LogRecordMetadata) bool {
-	return t.filename == other.filename &&
+	eq := t.filename == other.filename &&
 		*t.lsn == *other.lsn &&
-		*t.prev_lsn == *other.prev_lsn &&
 		*t.tid == *other.tid &&
 		t.optype == other.optype
+
+	if t.optype != LogBeginTransaction {
+		eq = eq && *t.prev_lsn == *other.prev_lsn
+	}
+
+	return eq
 }
 
 func (t *LogRecord) equals(other *LogRecord) bool {
@@ -479,4 +483,133 @@ func (t *Log) Append(record *LogRecord) error {
 		return fmt.Errorf("Did not write full buffer to file")
 	}
 	return err
+}
+
+type LogReader struct {
+	reader *bytes.Reader
+	offset int64
+}
+
+func (t *Log) CreateLogReaderAtCheckpoint() (*LogReader, error) {
+	file, err := os.Open(t.fromfile)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	stat, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	buf := make([]byte, stat.Size())
+	_, err = file.Read(buf)
+	if err != nil {
+		return nil, err
+	}
+
+	bbuf := bytes.NewReader(buf)
+	return &LogReader{bbuf, t.checkpoint_offset}, nil
+}
+
+func (t *LogReader) AtEnd() bool {
+	return t.reader.Len() == int(t.offset)
+}
+
+func (t *LogReader) GetOffset() int64 {
+	return t.offset
+}
+
+func (t *LogReader) SetOffset(offset int64) {
+	t.offset = offset
+}
+
+func (t *LogReader) LengthNext() (int64, error) {
+	if t.AtEnd() {
+		return 0, fmt.Errorf("At end")
+	}
+
+	lengthbuf := make([]byte, 8)
+	_, err := t.reader.ReadAt(lengthbuf, t.offset)
+	if err != nil {
+		return 0, err
+	}
+
+	length, err := read_int_log(bytes.NewBuffer(lengthbuf))
+	if err != nil {
+		return 0, err
+	}
+
+	return int64(length), nil
+}
+
+func (t *LogReader) LengthPrev() (int64, error) {
+	if t.offset == 0 {
+		return 0, fmt.Errorf("At start")
+	}
+
+	lengthbuf := make([]byte, 8)
+	_, err := t.reader.ReadAt(lengthbuf, t.offset-8)
+	if err != nil {
+		return 0, err
+	}
+
+	length, err := read_int_log(bytes.NewBuffer(lengthbuf))
+	if err != nil {
+		return 0, err
+	}
+
+	return int64(length), nil
+}
+
+func (t *LogReader) GetBuffer() ([]byte, error) {
+	length, err := t.LengthNext()
+	recordbuf := make([]byte, length)
+	_, err = t.reader.ReadAt(recordbuf, t.offset)
+	if err != nil {
+		return nil, err
+	}
+
+	return recordbuf, nil
+}
+
+func (t *LogReader) ReadMetadata() (*LogRecordMetadata, error) {
+	recordbuf, err := t.GetBuffer()
+	if err != nil {
+		return nil, err
+	}
+
+	// We skip the first 8 bytes as these are for the length
+	record, err := ReadLogMetadataFrom(bytes.NewBuffer(recordbuf[8:]))
+	return record, err
+}
+
+func (t *LogReader) ReadLogRecord(desc *TupleDesc) (*LogRecord, error) {
+	recordbuf, err := t.GetBuffer()
+	if err != nil {
+		return nil, err
+	}
+
+	record, err := ReadLogRecordFrom(bytes.NewBuffer(recordbuf), desc)
+	return record, err
+}
+
+func (t *LogReader) AdvanceNext() error {
+	length, err := t.LengthNext()
+	if err != nil {
+		return err
+	}
+
+	t.offset += length
+	return nil
+}
+
+func (t *LogReader) AdvancePrev() error {
+	length, err := t.LengthPrev()
+	if err != nil {
+		return err
+	}
+
+	t.offset -= length
+	return nil
 }
