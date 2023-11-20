@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"testing"
 )
 
@@ -23,7 +24,7 @@ func TestLogSerializeDeserialize(t *testing.T) {
 
 	log_record := &LogRecord{
 		metadata: LogRecordMetadata{
-			filename: "table.csv",
+			hh:       heapHash{"table.csv", 0},
 			prev_lsn: NewLSN(),
 			lsn:      NewLSN(),
 			tid:      NewTID(),
@@ -51,7 +52,7 @@ func TestLogSerializeDeserialize(t *testing.T) {
 	// Test that it can support the tuples being nil as well
 	log_record = &LogRecord{
 		metadata: LogRecordMetadata{
-			filename: "table.csv",
+			hh:       heapHash{"table.csv", 0},
 			prev_lsn: NewLSN(),
 			lsn:      NewLSN(),
 			tid:      NewTID(),
@@ -80,7 +81,7 @@ func TestLogSerializeDeserialize(t *testing.T) {
 	// Check non-insert-delete type
 	log_record = &LogRecord{
 		metadata: LogRecordMetadata{
-			filename: "table.csv",
+			hh:       heapHash{"table.csv", 0},
 			prev_lsn: NewLSN(),
 			lsn:      NewLSN(),
 			tid:      NewTID(),
@@ -118,10 +119,10 @@ func TestLogTransactionTable(t *testing.T) {
 	}
 
 	logrecord_insert := log.InsertLog("table.csv", tid, PositionDescriptor{0, 0}, &t1)
-	if (*log.get_transaction_table())[tid] != logrecord_insert.metadata.lsn {
+	if (*log.get_transaction_table())[*tid] != *logrecord_insert.metadata.lsn {
 		t.Fatalf("Transaction table not reflecting most recent lsn")
 	}
-	if (*log.get_dirty_page_table())[heapHash{"table.csv", 0}] != logrecord_insert.metadata.lsn {
+	if (*log.get_dirty_page_table())[heapHash{"table.csv", 0}] != *logrecord_insert.metadata.lsn {
 		t.Fatalf("Dirty page table does not reflect first dirtying of page")
 	}
 
@@ -131,10 +132,10 @@ func TestLogTransactionTable(t *testing.T) {
 	}
 
 	logrecord_delete := log.DeleteLog("table.csv", tid, PositionDescriptor{0, 0}, &t1)
-	if (*log.get_transaction_table())[tid] != logrecord_delete.metadata.lsn {
+	if (*log.get_transaction_table())[*tid] != *logrecord_delete.metadata.lsn {
 		t.Fatalf("Transaction table not reflecting most recent lsn")
 	}
-	if (*log.get_dirty_page_table())[heapHash{"table.csv", 0}] != logrecord_insert.metadata.lsn {
+	if (*log.get_dirty_page_table())[heapHash{"table.csv", 0}] != *logrecord_insert.metadata.lsn {
 		t.Fatalf("Dirty page table does not reflect first dirtying of page")
 	}
 
@@ -148,7 +149,7 @@ func TestLogTransactionTable(t *testing.T) {
 		t.Fatalf(err.Error())
 	}
 
-	_, ok := (*log.get_transaction_table())[tid]
+	_, ok := (*log.get_transaction_table())[*tid]
 	if ok {
 		t.Fatalf("Transaction table for tid should be cleared")
 	}
@@ -209,5 +210,44 @@ func TestLogReader(t *testing.T) {
 
 	if !reader.AtEnd() {
 		t.Fatalf("Reader should be at end now")
+	}
+}
+
+func TestLogRecovery(t *testing.T) {
+	ClearLog()
+	_, t1, _, _, _, _ := makeTestVars()
+	log, err := newLog(TestingFileLog)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	// Add a transaction of insert then delete then abort to the log
+	tid := NewTID()
+
+	records := make([]*LogRecord, 4)
+	records[0] = log.BeginTransactionLog(tid)
+	records[1] = log.InsertLog("table.csv", tid, PositionDescriptor{0, 0}, &t1)
+	records[2] = log.DeleteLog("table.csv", tid, PositionDescriptor{0, 0}, &t1)
+	records[3] = log.AbortTransactionLog(tid)
+
+	err = errors.Join(
+		log.Append(records[0]), log.Append(records[1]), log.Append(records[2]), log.Append(records[3]),
+	)
+	if err != nil {
+		t.Fatalf("Error adding to log")
+	}
+
+	recovery_log, err := newLog(TestingFileLog)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+	recovery_log.RecoverState()
+
+	if !reflect.DeepEqual(recovery_log.get_dirty_page_table(), log.get_dirty_page_table()) {
+		t.Fatal("Dirty page tables are not equal", recovery_log.get_dirty_page_table(), log.get_dirty_page_table())
+	}
+
+	if !reflect.DeepEqual(recovery_log.get_dirty_page_table(), log.get_dirty_page_table()) {
+		t.Fatal("Dirty page tables are not equal", recovery_log.get_dirty_page_table(), log.get_dirty_page_table())
 	}
 }

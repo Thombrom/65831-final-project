@@ -44,11 +44,11 @@ type Log struct {
 
 	// Maps the most recent log record written by that
 	// transaction
-	transaction_table map[TransactionID]LogSequenceNumber
+	transaction_table map[int]int
 
 	// Maps each pageno to the log record that first
 	// dirtied that page
-	dirty_page_table map[heapHash]LogSequenceNumber
+	dirty_page_table map[heapHash]int
 
 	// The offset into the log file for the last checkpoint
 	// This value is used for faster recovery
@@ -71,7 +71,7 @@ type LogOperation struct {
 
 type LogRecordMetadata struct {
 	// Filename is an empty string when optype != InsertDelete
-	filename string
+	hh       heapHash
 	lsn      LogSequenceNumber
 	tid      TransactionID
 	prev_lsn LogSequenceNumber
@@ -108,9 +108,9 @@ func checkpoint_filename(fromfile string) string {
 	return fromfile + ".chkpnt"
 }
 
-func recover_dirty_page_table(fromfile string) map[heapHash]LogSequenceNumber {
+func recover_dirty_page_table(fromfile string) map[heapHash]int {
 	filename := dirty_page_table_filename(fromfile)
-	mapping := make(map[heapHash]LogSequenceNumber)
+	mapping := make(map[heapHash]int)
 
 	if file_exists(filename) {
 		file, _ := os.Open(filename)
@@ -127,9 +127,9 @@ func recover_dirty_page_table(fromfile string) map[heapHash]LogSequenceNumber {
 	return mapping
 }
 
-func recover_transaction_table(fromfile string) map[TransactionID]LogSequenceNumber {
+func recover_transaction_table(fromfile string) map[int]int {
 	filename := transaction_table_filename(fromfile)
-	mapping := make(map[TransactionID]LogSequenceNumber)
+	mapping := make(map[int]int)
 
 	if file_exists(filename) {
 		file, _ := os.Open(filename)
@@ -169,7 +169,7 @@ func recover_checkpoint(fromfile string) int64 {
 // .dirty is the dirty page table file, the .txn is the transactions table and
 // the .chkpnt is the checkpoint table
 func newLog(fromfile string) (*Log, error) {
-	file, err := os.OpenFile(fromfile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0x744)
+	file, err := os.OpenFile(fromfile, os.O_CREATE|os.O_WRONLY, 0777)
 	if err != nil {
 		return nil, err
 	}
@@ -181,21 +181,63 @@ func newLog(fromfile string) (*Log, error) {
 	return &Log{fromfile, file, transaction_table, dirty_page_table, checkpoint, sync.Mutex{}}, nil
 }
 
-func (t *Log) get_dirty_page_table() *map[heapHash]LogSequenceNumber {
+func (t *Log) get_dirty_page_table() *map[heapHash]int {
 	return &t.dirty_page_table
 }
 
-func (t *Log) get_transaction_table() *map[TransactionID]LogSequenceNumber {
+func (t *Log) get_transaction_table() *map[int]int {
 	return &t.transaction_table
+}
+
+// Recovers state after a crash
+func (t *Log) RecoverState() error {
+	// When the log is initalized from file, it loads in the
+	// last stored dirty page table and transaction table, as well
+	// as checkpoint
+
+	reader, err := t.CreateLogReaderAtCheckpoint()
+	if err != nil {
+		return err
+	}
+
+	for !reader.AtEnd() {
+		metadata, err := reader.ReadMetadata()
+		if err != nil {
+			return err
+		}
+
+		switch metadata.optype {
+		case LogBeginTransaction:
+			t.transaction_table[*metadata.tid] = *metadata.lsn
+
+		case LogAbortTransaction:
+			delete(t.transaction_table, *metadata.tid)
+
+		case LogCommitTransaction:
+			delete(t.transaction_table, *metadata.tid)
+
+		case LogInsertDelete:
+			t.transaction_table[*metadata.tid] = *metadata.lsn
+			_, ok := t.dirty_page_table[metadata.hh]
+			if !ok {
+				t.dirty_page_table[metadata.hh] = *metadata.lsn
+			}
+		}
+
+		reader.AdvanceNext()
+	}
+
+	return nil
 }
 
 func (t *LogRecordMetadata) writeTo(b *bytes.Buffer) error {
 	err := errors.Join(
 		// Record filename
-		binary.Write(b, binary.LittleEndian, int64(len(t.filename))),
-		binary.Write(b, binary.LittleEndian, []byte(t.filename)),
+		binary.Write(b, binary.LittleEndian, int64(len(t.hh.FileName))),
+		binary.Write(b, binary.LittleEndian, []byte(t.hh.FileName)),
 
 		// Record next items
+		binary.Write(b, binary.LittleEndian, int64(t.hh.PageNo)),
 		binary.Write(b, binary.LittleEndian, int64(*t.lsn)),
 		binary.Write(b, binary.LittleEndian, int64(*t.tid)),
 		binary.Write(b, binary.LittleEndian, int64(t.optype)),
@@ -241,7 +283,8 @@ func (t *LogRecord) writeTo(b *bytes.Buffer) error {
 }
 
 func (t *LogRecordMetadata) equals(other *LogRecordMetadata) bool {
-	eq := t.filename == other.filename &&
+	eq := t.hh.FileName == other.hh.FileName &&
+		t.hh.PageNo == other.hh.PageNo &&
 		*t.lsn == *other.lsn &&
 		*t.tid == *other.tid &&
 		t.optype == other.optype
@@ -339,6 +382,11 @@ func ReadLogMetadataFrom(b *bytes.Buffer) (*LogRecordMetadata, error) {
 		return nil, err
 	}
 
+	pageno, err := read_int_log(b)
+	if err != nil {
+		return nil, err
+	}
+
 	lsn, err1 := read_int_log(b)
 	tid, err2 := read_int_log(b)
 	optype, err4 := read_int_log(b)
@@ -359,7 +407,7 @@ func ReadLogMetadataFrom(b *bytes.Buffer) (*LogRecordMetadata, error) {
 		prev_lsn = &prev_lsn_val
 	}
 
-	return &LogRecordMetadata{filename, &lsn, &tid, prev_lsn, optype_typed}, nil
+	return &LogRecordMetadata{heapHash{filename, pageno}, &lsn, &tid, prev_lsn, optype_typed}, nil
 }
 
 func ReadLogRecordFrom(b *bytes.Buffer, desc *TupleDesc) (*LogRecord, error) {
@@ -413,13 +461,13 @@ func (t *Log) InsertLog(filename string, tid TransactionID, position PositionDes
 	heap_hash := heapHash{FileName: filename, PageNo: int(position.PageNo)}
 	_, ok := t.dirty_page_table[heap_hash]
 	if !ok {
-		t.dirty_page_table[heap_hash] = lsn
+		t.dirty_page_table[heap_hash] = *lsn
 	}
 
-	prev_lsn := t.transaction_table[tid]
-	t.transaction_table[tid] = lsn
+	prev_lsn := t.transaction_table[*tid]
+	t.transaction_table[*tid] = *lsn
 
-	return &LogRecord{LogRecordMetadata{filename, lsn, tid, prev_lsn, LogInsertDelete}, &LogOperation{false, nil, position}, &LogOperation{true, new_tuple, position}}
+	return &LogRecord{LogRecordMetadata{heapHash{filename, int(position.PageNo)}, lsn, tid, &prev_lsn, LogInsertDelete}, &LogOperation{false, nil, position}, &LogOperation{true, new_tuple, position}}
 }
 
 func (t *Log) DeleteLog(filename string, tid TransactionID, position PositionDescriptor, prev_tuple *Tuple) *LogRecord {
@@ -431,13 +479,13 @@ func (t *Log) DeleteLog(filename string, tid TransactionID, position PositionDes
 	heap_hash := heapHash{FileName: filename, PageNo: int(position.PageNo)}
 	_, ok := t.dirty_page_table[heap_hash]
 	if !ok {
-		t.dirty_page_table[heap_hash] = lsn
+		t.dirty_page_table[heap_hash] = *lsn
 	}
 
-	prev_lsn := t.transaction_table[tid]
-	t.transaction_table[tid] = lsn
+	prev_lsn := t.transaction_table[*tid]
+	t.transaction_table[*tid] = *lsn
 
-	return &LogRecord{LogRecordMetadata{filename, lsn, tid, prev_lsn, LogInsertDelete}, &LogOperation{true, prev_tuple, position}, &LogOperation{false, nil, position}}
+	return &LogRecord{LogRecordMetadata{heapHash{filename, int(position.PageNo)}, lsn, tid, &prev_lsn, LogInsertDelete}, &LogOperation{true, prev_tuple, position}, &LogOperation{false, nil, position}}
 }
 
 func (t *Log) BeginTransactionLog(tid TransactionID) *LogRecord {
@@ -445,9 +493,9 @@ func (t *Log) BeginTransactionLog(tid TransactionID) *LogRecord {
 	defer t.mutex.Unlock()
 
 	lsn := NewLSN()
-	t.transaction_table[tid] = lsn
+	t.transaction_table[*tid] = *lsn
 
-	return &LogRecord{LogRecordMetadata{"", lsn, tid, nil, LogBeginTransaction}, nil, nil}
+	return &LogRecord{LogRecordMetadata{heapHash{"", 0}, lsn, tid, nil, LogBeginTransaction}, nil, nil}
 }
 
 func (t *Log) CommitTransactionLog(tid TransactionID) *LogRecord {
@@ -455,10 +503,10 @@ func (t *Log) CommitTransactionLog(tid TransactionID) *LogRecord {
 	defer t.mutex.Unlock()
 
 	lsn := NewLSN()
-	prev_lsn := t.transaction_table[tid]
-	delete(t.transaction_table, tid)
+	prev_lsn := t.transaction_table[*tid]
+	delete(t.transaction_table, *tid)
 
-	return &LogRecord{LogRecordMetadata{"", lsn, tid, prev_lsn, LogCommitTransaction}, nil, nil}
+	return &LogRecord{LogRecordMetadata{heapHash{"", 0}, lsn, tid, &prev_lsn, LogCommitTransaction}, nil, nil}
 }
 
 func (t *Log) AbortTransactionLog(tid TransactionID) *LogRecord {
@@ -466,14 +514,15 @@ func (t *Log) AbortTransactionLog(tid TransactionID) *LogRecord {
 	defer t.mutex.Unlock()
 
 	lsn := NewLSN()
-	prev_lsn := t.transaction_table[tid]
-	delete(t.transaction_table, tid)
+	prev_lsn := t.transaction_table[*tid]
+	delete(t.transaction_table, *tid)
 
-	return &LogRecord{LogRecordMetadata{"", lsn, tid, prev_lsn, LogAbortTransaction}, nil, nil}
+	return &LogRecord{LogRecordMetadata{heapHash{"", 0}, lsn, tid, &prev_lsn, LogAbortTransaction}, nil, nil}
 }
 
 func (t *Log) Append(record *LogRecord) error {
-	// File writes are atomic so no need to lock here
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
 
 	buf := new(bytes.Buffer)
 	record.writeTo(buf)
