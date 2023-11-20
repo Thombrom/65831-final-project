@@ -113,12 +113,17 @@ func TestLogTransactionTable(t *testing.T) {
 
 	// Add a transaction of insert then delete then abort to the log
 	tid := NewTID()
-	err = log.Append(log.BeginTransactionLog(tid))
+	err = log.Append(BeginTransactionLog(tid))
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
 
-	logrecord_insert := log.InsertLog("table.csv", tid, PositionDescriptor{0, 0}, &t1)
+	logrecord_insert := InsertLog("table.csv", tid, PositionDescriptor{0, 0}, &t1)
+	err = log.Append(logrecord_insert)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
 	if (*log.get_transaction_table())[*tid] != *logrecord_insert.metadata.lsn {
 		t.Fatalf("Transaction table not reflecting most recent lsn")
 	}
@@ -126,12 +131,12 @@ func TestLogTransactionTable(t *testing.T) {
 		t.Fatalf("Dirty page table does not reflect first dirtying of page")
 	}
 
-	err = log.Append(logrecord_insert)
+	logrecord_delete := DeleteLog("table.csv", tid, PositionDescriptor{0, 0}, &t1)
+	err = log.Append(logrecord_delete)
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
 
-	logrecord_delete := log.DeleteLog("table.csv", tid, PositionDescriptor{0, 0}, &t1)
 	if (*log.get_transaction_table())[*tid] != *logrecord_delete.metadata.lsn {
 		t.Fatalf("Transaction table not reflecting most recent lsn")
 	}
@@ -139,12 +144,7 @@ func TestLogTransactionTable(t *testing.T) {
 		t.Fatalf("Dirty page table does not reflect first dirtying of page")
 	}
 
-	err = log.Append(logrecord_delete)
-	if err != nil {
-		t.Fatalf(err.Error())
-	}
-
-	err = log.Append(log.AbortTransactionLog(tid))
+	err = log.Append(AbortTransactionLog(tid))
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
@@ -167,10 +167,10 @@ func TestLogReader(t *testing.T) {
 	tid := NewTID()
 
 	records := make([]*LogRecord, 4)
-	records[0] = log.BeginTransactionLog(tid)
-	records[1] = log.InsertLog("table.csv", tid, PositionDescriptor{0, 0}, &t1)
-	records[2] = log.DeleteLog("table.csv", tid, PositionDescriptor{0, 0}, &t1)
-	records[3] = log.AbortTransactionLog(tid)
+	records[0] = BeginTransactionLog(tid)
+	records[1] = InsertLog("table.csv", tid, PositionDescriptor{0, 0}, &t1)
+	records[2] = DeleteLog("table.csv", tid, PositionDescriptor{0, 0}, &t1)
+	records[3] = AbortTransactionLog(tid)
 
 	err = errors.Join(
 		log.Append(records[0]), log.Append(records[1]), log.Append(records[2]), log.Append(records[3]),
@@ -225,10 +225,10 @@ func TestLogRecovery(t *testing.T) {
 	tid := NewTID()
 
 	records := make([]*LogRecord, 4)
-	records[0] = log.BeginTransactionLog(tid)
-	records[1] = log.InsertLog("table.csv", tid, PositionDescriptor{0, 0}, &t1)
-	records[2] = log.DeleteLog("table.csv", tid, PositionDescriptor{0, 0}, &t1)
-	records[3] = log.AbortTransactionLog(tid)
+	records[0] = BeginTransactionLog(tid)
+	records[1] = InsertLog("table.csv", tid, PositionDescriptor{0, 0}, &t1)
+	records[2] = DeleteLog("table.csv", tid, PositionDescriptor{0, 0}, &t1)
+	records[3] = AbortTransactionLog(tid)
 
 	err = errors.Join(
 		log.Append(records[0]), log.Append(records[1]), log.Append(records[2]), log.Append(records[3]),
@@ -249,5 +249,134 @@ func TestLogRecovery(t *testing.T) {
 
 	if !reflect.DeepEqual(recovery_log.get_dirty_page_table(), log.get_dirty_page_table()) {
 		t.Fatal("Dirty page tables are not equal", recovery_log.get_dirty_page_table(), log.get_dirty_page_table())
+	}
+}
+
+func TestLogFindRedo(t *testing.T) {
+	ClearLog()
+	_, t1, t2, _, _, _ := makeTestVars()
+	log, err := newLog(TestingFileLog)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	tid1 := NewTID()
+	tid2 := NewTID()
+	tid3 := NewTID()
+
+	records := [...]*LogRecord{
+		BeginTransactionLog(tid1),
+		InsertLog("a", tid1, PositionDescriptor{0, 0}, &t1),
+		InsertLog("b", tid1, PositionDescriptor{0, 0}, &t2),
+		BeginTransactionLog(tid3),
+		InsertLog("c", tid1, PositionDescriptor{0, 0}, &t2),
+		BeginTransactionLog(tid2),
+		InsertLog("d", tid2, PositionDescriptor{0, 0}, &t1),
+		CommitTransactionLog(tid1),
+		InsertLog("a", tid2, PositionDescriptor{0, 0}, &t1),
+		CommitTransactionLog(tid2),
+		InsertLog("e", tid3, PositionDescriptor{0, 0}, &t2),
+	}
+
+	for _, record := range records {
+		err = log.Append(record)
+		if err != nil {
+			t.Fatalf(err.Error())
+		}
+	}
+
+	recovery_log, err := newLog(TestingFileLog)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+	recovery_log.RecoverState()
+
+	offsets, err := recovery_log.get_redo_record_offsets()
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+	expected := [...]int{
+		*records[10].metadata.lsn, *records[8].metadata.lsn, *records[6].metadata.lsn,
+		*records[4].metadata.lsn, *records[2].metadata.lsn, *records[1].metadata.lsn,
+	}
+
+	reader, err := recovery_log.CreateLogReaderAtEnd()
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+	for idx, offset := range offsets {
+		reader.SetOffset(offset)
+		metadata, err := reader.ReadMetadata()
+		if err != nil {
+			t.Fatalf(err.Error())
+		}
+
+		if expected[idx] != *metadata.lsn {
+			t.Fatalf("Redo LSNS does not match")
+		}
+	}
+}
+
+func TestLogFindUndo(t *testing.T) {
+	ClearLog()
+	_, t1, t2, _, _, _ := makeTestVars()
+	log, err := newLog(TestingFileLog)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	tid1 := NewTID()
+	tid2 := NewTID()
+	tid3 := NewTID()
+
+	records := [...]*LogRecord{
+		BeginTransactionLog(tid1),
+		InsertLog("a", tid1, PositionDescriptor{0, 0}, &t1),
+		InsertLog("b", tid1, PositionDescriptor{0, 0}, &t2),
+		BeginTransactionLog(tid3),
+		InsertLog("c", tid1, PositionDescriptor{0, 0}, &t2),
+		BeginTransactionLog(tid2),
+		InsertLog("d", tid2, PositionDescriptor{0, 0}, &t1),
+		CommitTransactionLog(tid1),
+		InsertLog("a", tid2, PositionDescriptor{0, 0}, &t1),
+		CommitTransactionLog(tid2),
+		InsertLog("e", tid3, PositionDescriptor{0, 0}, &t2),
+	}
+
+	for _, record := range records {
+		err = log.Append(record)
+		if err != nil {
+			t.Fatalf(err.Error())
+		}
+	}
+
+	recovery_log, err := newLog(TestingFileLog)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+	recovery_log.RecoverState()
+
+	offsets, err := recovery_log.get_undo_record_offsets()
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+	expected := [...]int{
+		*records[10].metadata.lsn,
+	}
+
+	reader, err := recovery_log.CreateLogReaderAtEnd()
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+	for idx, offset := range offsets {
+		reader.SetOffset(offset)
+		metadata, err := reader.ReadMetadata()
+		if err != nil {
+			t.Fatalf(err.Error())
+		}
+
+		if expected[idx] != *metadata.lsn {
+			t.Fatalf("Undo LSNS does not match")
+		}
 	}
 }
