@@ -2,7 +2,6 @@ package godb
 
 import (
 	"bytes"
-	"fmt"
 	"os"
 	"testing"
 )
@@ -18,9 +17,10 @@ func TestLogSerializeDeserialize(t *testing.T) {
 		prev_lsn: NewLSN(),
 		lsn:      NewLSN(),
 		tid:      NewTID(),
+		optype:   LogInsertDelete,
 
-		undo: &LogOperation{tuple: &t1, pd: PositionDescriptor{0, 0}, operation: OperationWrite},
-		redo: &LogOperation{tuple: &t2, pd: PositionDescriptor{0, 0}, operation: OperationWrite},
+		undo: &LogOperation{tuple: &t1, pd: PositionDescriptor{0, 1}},
+		redo: &LogOperation{tuple: &t2, pd: PositionDescriptor{1, 0}},
 	}
 
 	buffer := new(bytes.Buffer)
@@ -28,7 +28,6 @@ func TestLogSerializeDeserialize(t *testing.T) {
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
-	fmt.Println(buffer.Len())
 
 	log_record_read, err := ReadLogRecordFrom(buffer, &td)
 	if err != nil {
@@ -45,9 +44,10 @@ func TestLogSerializeDeserialize(t *testing.T) {
 		prev_lsn: NewLSN(),
 		lsn:      NewLSN(),
 		tid:      NewTID(),
+		optype:   LogInsertDelete,
 
-		undo: &LogOperation{tuple: nil, pd: PositionDescriptor{0, 0}, operation: OperationWrite},
-		redo: &LogOperation{tuple: nil, pd: PositionDescriptor{0, 0}, operation: OperationDelete},
+		undo: &LogOperation{tuple: nil, pd: PositionDescriptor{1, 0}},
+		redo: &LogOperation{tuple: nil, pd: PositionDescriptor{0, 1}},
 	}
 
 	buffer = new(bytes.Buffer)
@@ -55,7 +55,6 @@ func TestLogSerializeDeserialize(t *testing.T) {
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
-	fmt.Println(buffer.Len())
 
 	log_record_read, err = ReadLogRecordFrom(buffer, &td)
 	if err != nil {
@@ -64,5 +63,28 @@ func TestLogSerializeDeserialize(t *testing.T) {
 
 	if !log_record.equals(log_record_read) {
 		t.Fatalf("Comparison of log records did not equal")
+	}
+
+	// Check non-insert-delete type
+	log_record = &LogRecord{
+		filename: "table.csv",
+		prev_lsn: NewLSN(),
+		lsn:      NewLSN(),
+		tid:      NewTID(),
+		optype:   LogAbortTransaction,
+
+		undo: nil,
+		redo: nil,
+	}
+
+	buffer = new(bytes.Buffer)
+	err = log_record.writeTo(buffer)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	log_record_read, err = ReadLogRecordFrom(buffer, &td)
+	if err != nil {
+		t.Fatalf(err.Error())
 	}
 }
