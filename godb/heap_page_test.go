@@ -8,7 +8,7 @@ import (
 func TestInsertHeapPage(t *testing.T) {
 	td, t1, t2, hf, _, _ := makeTestVars()
 	pg := newHeapPage(&td, 0, hf)
-	var expectedSlots = (PageSize - 8) / (StringLength + int(unsafe.Sizeof(int64(0))))
+	var expectedSlots = (PageSize - 8) / (StringLength + int(unsafe.Sizeof(int64(0))) + 1)
 	if pg.getNumSlots() != expectedSlots {
 		t.Fatalf("Incorrect number of slots, expected %d, got %d", expectedSlots, pg.getNumSlots())
 	}

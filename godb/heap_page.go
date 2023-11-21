@@ -62,13 +62,13 @@ func newHeapPage(desc *TupleDesc, pageNo int, f *HeapFile) *heapPage {
 	bytesForSlots := PageSize - 8
 	bytesPerTuple := desc.BinarySize()
 
-	numSlots := bytesForSlots / bytesPerTuple
+	numSlots := bytesForSlots / (bytesPerTuple + 1)
 	return &heapPage{tuples: make([]*Tuple, numSlots), desc: desc, dirty: false, pageNo: pageNo, file: f}
 }
 
 func (h *heapPage) getNumSlots() int {
 	bytesForSlots := PageSize - 8
-	bytesPerTuple := h.desc.BinarySize()
+	bytesPerTuple := h.desc.BinarySize() + 1 // We add one for the byte we pad to indicate if that slot contains a nil value
 
 	return bytesForSlots / bytesPerTuple
 }
@@ -152,6 +152,9 @@ func (h *heapPage) toBuffer() (*bytes.Buffer, error) {
 	binary.Write(buf, binary.LittleEndian, &used)
 
 	for _, tuple := range h.tuples {
+		is_nil := tuple == nil
+		binary.Write(buf, binary.LittleEndian, is_nil)
+
 		if tuple != nil {
 			err := tuple.writeTo(buf)
 			if err != nil {
@@ -161,7 +164,7 @@ func (h *heapPage) toBuffer() (*bytes.Buffer, error) {
 	}
 
 	// Make sure that pages serialize to exactly PageSize number of bytes
-	padding := make([]byte, PageSize-int(used)*h.desc.BinarySize()-8)
+	padding := make([]byte, PageSize-int(used)*(h.desc.BinarySize()+1)-8)
 	binary.Write(buf, binary.LittleEndian, padding)
 
 	return buf, nil
@@ -177,7 +180,13 @@ func (h *heapPage) initFromBuffer(buf *bytes.Buffer) error {
 	binary.Read(buf, binary.LittleEndian, &used)
 	h.tuples = make([]*Tuple, slots)
 
-	for i := 0; i < int(used); i++ {
+	for i := 0; i < int(slots); i++ {
+		var is_nil bool
+		binary.Read(buf, binary.LittleEndian, &is_nil)
+		if is_nil {
+			continue
+		}
+
 		val, err := readTupleFrom(buf, h.desc)
 		if err != nil {
 			return err
