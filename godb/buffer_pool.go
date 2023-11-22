@@ -78,6 +78,9 @@ func (bp *BufferPool) FlushAllPages() {
 
 func (bp *BufferPool) UndoTransaction(tid TransactionID) error {
 	reader, err := bp.log.CreateLogReaderAtEnd()
+	// fmt.Println("Creating reader at: ", reader.offset)
+	// lp, _ := reader.LengthPrev()
+	// fmt.Println("Prev size: ", lp)
 	if err != nil {
 		return err
 	}
@@ -87,6 +90,7 @@ func (bp *BufferPool) UndoTransaction(tid TransactionID) error {
 		if err != nil {
 			return err
 		}
+		// fmt.Println("Reader now at ", reader.offset)
 
 		metadata, err := reader.ReadMetadata()
 		if err != nil {
@@ -112,6 +116,7 @@ func (bp *BufferPool) UndoTransaction(tid TransactionID) error {
 		// so it should be no problem to edit it here
 		page, ok := bp.pages[record.metadata.hh]
 		if ok {
+			fmt.Println("Undo, inserting ", record.undo.tuple, " into ", record.undo.pd.SlotNo)
 			(*page).(*heapPage).insertTupleAt(record.undo.tuple, int(record.undo.pd.SlotNo))
 		} else {
 			page, err = file.readPage(record.metadata.hh.PageNo)
@@ -162,6 +167,7 @@ func (bp *BufferPool) FinishTransaction(tid TransactionID, commit bool) {
 					if !commit {
 						err := bp.UndoTransaction(tid)
 						if err != nil {
+							fmt.Println(err.Error())
 							fmt.Println("!!! Error in undoing transaction !!!")
 						}
 					}

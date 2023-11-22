@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -649,4 +651,183 @@ func TestLogEvictDirtyPages(t *testing.T) {
 	if len(collection) != 500 {
 		t.Fatalf("Tuple count mismatch %d != %d", len(collection), 500)
 	}
+}
+
+func TestLogMultipleRecoveries(t *testing.T) {
+	ClearLog()
+	td := &TupleDesc{Fields: []FieldType{{Ftype: IntType}, {Ftype: IntType}}}
+	rs := rand.NewSource(42)
+
+	make_tuple := func(a int64, b int64) *Tuple {
+		return &Tuple{Desc: *td, Fields: []DBValue{IntField{int64(a)}, IntField{int64(b)}}}
+	}
+
+	num_recoveries := 10
+	num_concurrent := 10
+
+	heap_file_names := make([]string, num_concurrent)
+	collections := make([][]int, num_concurrent)
+
+	for i := 0; i < num_concurrent; i++ {
+		collections[i] = make([]int, 0)
+		heap_file_names[i] = "test_heap" + strconv.Itoa(i) + ".dat"
+		os.Remove(heap_file_names[i])
+	}
+
+	c := make(chan int, num_concurrent)
+
+	do_round := func(bp *BufferPool, hf *HeapFile, collection_index int) {
+		var tid TransactionID
+		nums := make([]int, 0)
+
+		for i := 0; i < 10; i++ {
+			v := rs.Int63()
+
+			// 10% chance of starting a new transaction
+			if v%10 == 0 {
+				if tid != nil {
+					fmt.Println("Committing transactio ", *tid)
+					bp.CommitTransaction(tid)
+
+					// Add them to the collection
+					collections[collection_index] = append(collections[collection_index], nums...)
+					nums = make([]int, 0)
+				}
+
+				tid = NewTID()
+
+				fmt.Println("Beginning transaction ", *tid)
+				bp.BeginTransaction(tid)
+				continue
+			}
+
+			// 10% chance of aborting a transaction
+			if v%10 == 1 {
+				if tid != nil {
+					fmt.Println("Aborting transaction ", *tid)
+					bp.AbortTransaction(tid)
+					nums = make([]int, 0)
+				}
+
+				tid = NewTID()
+
+				fmt.Println("Beginning transaction ", *tid)
+				bp.BeginTransaction(tid)
+				continue
+			}
+
+			if tid == nil {
+				continue
+			}
+
+			// 80 % chance of inserting a value that we record
+			val := rand.Int63()
+			fmt.Println("Inserting ", int(val))
+			nums = append(nums, int(val))
+			hf.insertTuple(make_tuple(int64(collection_index), int64(int(val))), tid)
+		}
+
+		c <- 0
+	}
+
+	check_correct_values := func(bp *BufferPool, heap_files []*HeapFile) {
+		for i := 0; i < num_concurrent; i++ {
+			collected := make([]int, 0)
+
+			tid := NewTID()
+			bp.BeginTransaction(tid)
+			iter, err := heap_files[i].Iterator(tid)
+			if err != nil {
+				t.Fatalf(err.Error())
+			}
+
+			for {
+				val, err := iter()
+				if err != nil {
+					t.Fatalf(err.Error())
+				}
+
+				if val == nil {
+					break
+				}
+				collected = append(collected, int(val.Fields[1].(IntField).Value))
+			}
+
+			// fmt.Println(collected, " vs ", collections[i])
+
+			if len(collected) != len(collections[i]) {
+				t.Fatalf("Count mismatch")
+			}
+
+			for idx, val := range collected {
+				if val != collections[i][idx] {
+					t.Fatalf("Invalid value at index %d", idx)
+				}
+			}
+
+			bp.CommitTransaction(tid)
+		}
+	}
+
+	for i := 0; i < num_recoveries; i++ {
+		bp := NewBufferPool(20, TestingFileLog)
+
+		// Re-initialize heapfiles
+		heap_files := make([]*HeapFile, 0)
+		for i := 0; i < num_concurrent; i++ {
+			hf, err := NewHeapFile(heap_file_names[i], td, bp)
+			if err != nil {
+				t.Fatalf(err.Error())
+			}
+
+			fmt.Println(hf)
+			heap_files = append(heap_files, hf)
+		}
+
+		// Recover the log
+		fmt.Println(heap_files)
+		fmt.Println("Recovering")
+		err := bp.log.Recover(heap_files)
+		if err != nil {
+			t.Fatalf(err.Error())
+		}
+
+		check_correct_values(bp, heap_files)
+
+		for j := 0; j < num_concurrent; j++ {
+			go do_round(bp, heap_files[j], j)
+		}
+
+		// Wait for the rounds to complete
+		for j := 0; j < num_concurrent; j++ {
+			_ = <-c
+		}
+
+		err = bp.log.Close()
+		if err != nil {
+			t.Fatalf(err.Error())
+		}
+	}
+
+	bp := NewBufferPool(20, TestingFileLog)
+
+	// Re-initialize heapfiles
+	heap_files := make([]*HeapFile, 0)
+	for i := 0; i < num_concurrent; i++ {
+		hf, err := NewHeapFile(heap_file_names[i], td, bp)
+		if err != nil {
+			t.Fatalf(err.Error())
+		}
+
+		heap_files = append(heap_files, hf)
+	}
+
+	// Recover the log
+	fmt.Println("Recovering")
+	err := bp.log.Recover(heap_files)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	check_correct_values(bp, heap_files)
 }

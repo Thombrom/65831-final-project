@@ -3,6 +3,7 @@ package godb
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"os"
@@ -52,7 +53,8 @@ type Log struct {
 
 	// The offset into the log file for the last checkpoint
 	// This value is used for faster recovery
-	checkpoint_offset int64
+	checkpoint_offset        int64
+	records_since_checkpoint int64
 
 	mutex sync.Mutex
 }
@@ -121,7 +123,12 @@ func recover_dirty_page_table(fromfile string) map[heapHash]int {
 		file.Read(buf)
 
 		bbuf := bytes.NewBuffer(buf)
-		binary.Read(bbuf, binary.LittleEndian, mapping)
+		decoder := gob.NewDecoder(bbuf)
+		err := decoder.Decode(&mapping)
+
+		if err != nil {
+			return make(map[heapHash]int)
+		}
 	}
 
 	return mapping
@@ -140,7 +147,12 @@ func recover_transaction_table(fromfile string) map[int]int {
 		file.Read(buf)
 
 		bbuf := bytes.NewBuffer(buf)
-		binary.Read(bbuf, binary.LittleEndian, mapping)
+		decoder := gob.NewDecoder(bbuf)
+		err := decoder.Decode(&mapping)
+
+		if err != nil {
+			return make(map[int]int)
+		}
 	}
 
 	return mapping
@@ -169,7 +181,7 @@ func recover_checkpoint(fromfile string) int64 {
 // .dirty is the dirty page table file, the .txn is the transactions table and
 // the .chkpnt is the checkpoint table
 func newLog(fromfile string) (*Log, error) {
-	file, err := os.OpenFile(fromfile, os.O_CREATE|os.O_WRONLY, 0777)
+	file, err := os.OpenFile(fromfile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0777)
 	if err != nil {
 		return nil, err
 	}
@@ -177,8 +189,13 @@ func newLog(fromfile string) (*Log, error) {
 	dirty_page_table := recover_dirty_page_table(fromfile)
 	transaction_table := recover_transaction_table(fromfile)
 	checkpoint := recover_checkpoint(fromfile)
+	fmt.Println(dirty_page_table, transaction_table, checkpoint)
 
-	return &Log{fromfile, file, transaction_table, dirty_page_table, checkpoint, sync.Mutex{}}, nil
+	return &Log{fromfile, file, transaction_table, dirty_page_table, checkpoint, 0, sync.Mutex{}}, nil
+}
+
+func (t *Log) Close() error {
+	return t.file.Close()
 }
 
 func (t *Log) get_dirty_page_table() *map[heapHash]int {
@@ -249,6 +266,7 @@ func (t *Log) get_redo_record_offsets() ([]int64, error) {
 		return nil, err
 	}
 	result := make([]int64, 0)
+	aborted_tids := make(map[int]int)
 
 	// If no dirty pages, we can quit early
 	if len(t.dirty_page_table) == 0 {
@@ -272,6 +290,11 @@ func (t *Log) get_redo_record_offsets() ([]int64, error) {
 		if err != nil {
 			return nil, err
 		}
+		// fmt.Println("Redo metadata: ", metadata)
+
+		if metadata.optype == LogAbortTransaction {
+			aborted_tids[*metadata.tid] = 0
+		}
 
 		if metadata.optype != LogInsertDelete {
 			continue
@@ -281,8 +304,9 @@ func (t *Log) get_redo_record_offsets() ([]int64, error) {
 			break
 		}
 
-		_, ok := t.dirty_page_table[metadata.hh]
-		if ok {
+		_, in_dirty_pages := t.dirty_page_table[metadata.hh]
+		_, got_aborted := aborted_tids[*metadata.tid]
+		if in_dirty_pages && !got_aborted {
 			result = append(result, reader.GetOffset())
 		}
 	}
@@ -392,7 +416,7 @@ func (t *Log) Recover(heapfiles []*HeapFile) error {
 		}
 
 		heappage := (*page).(*heapPage)
-		fmt.Println("Inserting ", logrecord.redo.tuple, " into ", metadata.hh.FileName, " on page ", metadata.hh.PageNo, " in slot ", logrecord.redo.pd.SlotNo)
+		fmt.Println("Redo - Inserting ", logrecord.redo.tuple, " into ", metadata.hh.FileName, " on page ", metadata.hh.PageNo, " in slot ", logrecord.redo.pd.SlotNo)
 		heappage.insertTupleAt(logrecord.redo.tuple, int(logrecord.redo.pd.SlotNo))
 		file.flushPage(page)
 	}
@@ -427,7 +451,7 @@ func (t *Log) Recover(heapfiles []*HeapFile) error {
 		}
 
 		heappage := (*page).(*heapPage)
-		fmt.Println("Inserting ", logrecord.undo.tuple, " into ", metadata.hh.FileName, " on page ", metadata.hh.PageNo, " in slot ", logrecord.redo.pd.SlotNo)
+		fmt.Println("Undo - Inserting ", logrecord.undo.tuple, " into ", metadata.hh.FileName, " on page ", metadata.hh.PageNo, " in slot ", logrecord.redo.pd.SlotNo)
 		heappage.insertTupleAt(logrecord.undo.tuple, int(logrecord.redo.pd.SlotNo))
 		err = file.flushPage(page)
 		if err != nil {
@@ -452,6 +476,78 @@ func (t *Log) Recover(heapfiles []*HeapFile) error {
 		delete(t.transaction_table, k)
 	}
 
+	t.CheckpointL()
+	return nil
+}
+
+func (t *Log) CheckpointL() error {
+
+	{ // Transaction table
+		filename := transaction_table_filename(t.fromfile)
+		file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY, 0777)
+		if err != nil {
+			return err
+		}
+
+		bbuf := new(bytes.Buffer)
+		encoder := gob.NewEncoder(bbuf)
+		err = encoder.Encode(t.transaction_table)
+		if err != nil {
+			return err
+		}
+
+		_, err = file.Write(bbuf.Bytes())
+		if err != nil {
+			return err
+		}
+	}
+
+	{ // Transaction table
+		filename := dirty_page_table_filename(t.fromfile)
+		file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY, 0777)
+		if err != nil {
+			return err
+		}
+
+		bbuf := new(bytes.Buffer)
+		encoder := gob.NewEncoder(bbuf)
+		err = encoder.Encode(t.dirty_page_table)
+		if err != nil {
+			return err
+		}
+
+		_, err = file.Write(bbuf.Bytes())
+		if err != nil {
+			return err
+		}
+	}
+
+	{ // Checkpoint location
+		filename := checkpoint_filename(t.fromfile)
+		file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY, 0777)
+		if err != nil {
+			return err
+		}
+
+		buf := make([]byte, 0)
+		bbuf := bytes.NewBuffer(buf)
+
+		stat, err := t.file.Stat()
+		if err != nil {
+			return err
+		}
+
+		err = binary.Write(bbuf, binary.LittleEndian, stat.Size())
+		if err != nil {
+			return err
+		}
+		_, err = file.Write(bbuf.Bytes())
+		if err != nil {
+			return err
+		}
+	}
+
+	t.records_since_checkpoint = 0
 	return nil
 }
 
@@ -736,10 +832,28 @@ func (t *Log) Append(record *LogRecord) error {
 	buf := new(bytes.Buffer)
 	record.writeTo(buf)
 
+	// stat, _ := t.file.Stat()
+	// fmt.Println("Appending ", buf.Len(), " bytes to ", stat.Size())
+
 	n, err := t.file.Write(buf.Bytes())
+	// fmt.Println(n, err)
 	if n != buf.Len() {
 		return fmt.Errorf("Did not write full buffer to file")
 	}
+
+	if err != nil {
+		return err
+	}
+
+	t.records_since_checkpoint += 1
+	if t.records_since_checkpoint > 10 {
+		err := t.CheckpointL()
+		if err != nil {
+			fmt.Println("Error: ", err.Error())
+			return err
+		}
+	}
+
 	return err
 }
 
@@ -831,11 +945,14 @@ func (t *LogReader) LengthPrev() (int64, error) {
 		return 0, err
 	}
 
+	// fmt.Println("Length of prev: ", length)
 	return int64(length), nil
 }
 
 func (t *LogReader) GetBuffer() ([]byte, error) {
 	length, err := t.LengthNext()
+	// fmt.Println("Getting buffer. Offset: ", t.offset, ", Length: ", length)
+	// fmt.Println("length: ", length, t.offset)
 	recordbuf := make([]byte, length)
 	_, err = t.reader.ReadAt(recordbuf, t.offset)
 	if err != nil {

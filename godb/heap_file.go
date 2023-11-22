@@ -190,6 +190,11 @@ func (f *HeapFile) insertTuple(t *Tuple, tid TransactionID) error {
 	f.mutex.Lock()
 	defer f.mutex.Unlock()
 
+	filename, err := f.GetFilename()
+	if err != nil {
+		return err
+	}
+
 	startPageno := 0
 	if f.fileContinuous {
 		startPageno = f.NumPages() - 1
@@ -209,12 +214,6 @@ func (f *HeapFile) insertTuple(t *Tuple, tid TransactionID) error {
 		}
 
 		// Record in the log
-		filename, err := f.GetFilename()
-		if err != nil {
-			// Delete it again and return the error
-			heap_page.deleteTuple(t)
-			return err
-		}
 		err = f.bufPool.appendLog(InsertLog(filename, tid, PositionDescriptor{int64(heap_page.pageNo), int64(t.Rid.(RId).slotNo)}, t))
 		if err != nil {
 			// Delete it again and return the error
@@ -232,7 +231,7 @@ func (f *HeapFile) insertTuple(t *Tuple, tid TransactionID) error {
 
 	var ppage Page
 	ppage = heap_page
-	err := f.flushPage(&ppage)
+	err = f.flushPage(&ppage)
 	if err != nil {
 		return err
 	}
@@ -245,6 +244,14 @@ func (f *HeapFile) insertTuple(t *Tuple, tid TransactionID) error {
 	heap_page = (*page).(*heapPage)
 	_, err = heap_page.insertTuple(t)
 	if err != nil {
+		return err
+	}
+
+	// Record in the log
+	err = f.bufPool.appendLog(InsertLog(filename, tid, PositionDescriptor{int64(heap_page.pageNo), int64(t.Rid.(RId).slotNo)}, t))
+	if err != nil {
+		// Delete it again and return the error
+		heap_page.deleteTuple(t)
 		return err
 	}
 
@@ -310,8 +317,8 @@ func (f *HeapFile) flushPage(p *Page) error {
 		return err
 	}
 
-	f.file.WriteAt(buf.Bytes(), int64(heap_page.pageNo)*int64(PageSize))
-	return nil
+	_, err = f.file.WriteAt(buf.Bytes(), int64(heap_page.pageNo)*int64(PageSize))
+	return err
 }
 
 // [Operator] descriptor method -- return the TupleDesc for this HeapFile

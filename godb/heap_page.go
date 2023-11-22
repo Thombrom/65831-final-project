@@ -173,7 +173,7 @@ func (h *heapPage) toBuffer() (*bytes.Buffer, error) {
 	}
 
 	// Make sure that pages serialize to exactly PageSize number of bytes
-	padding := make([]byte, PageSize-int(used)*(h.desc.BinarySize()+1)-8)
+	padding := make([]byte, PageSize-int(used)*(h.desc.BinarySize()+1)-(int(slots)-int(used))-8)
 	binary.Write(buf, binary.LittleEndian, padding)
 
 	return buf, nil
