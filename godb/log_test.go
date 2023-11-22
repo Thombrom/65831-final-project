@@ -213,7 +213,7 @@ func TestLogReader(t *testing.T) {
 	}
 }
 
-func TestLogRecovery(t *testing.T) {
+func TestLogRecoverState(t *testing.T) {
 	ClearLog()
 	_, t1, _, _, _, _ := makeTestVars()
 	log, err := newLog(TestingFileLog)
@@ -296,8 +296,8 @@ func TestLogFindRedo(t *testing.T) {
 		t.Fatalf(err.Error())
 	}
 	expected := [...]int{
-		*records[10].metadata.lsn, *records[8].metadata.lsn, *records[6].metadata.lsn,
-		*records[4].metadata.lsn, *records[2].metadata.lsn, *records[1].metadata.lsn,
+		*records[1].metadata.lsn, *records[2].metadata.lsn, *records[4].metadata.lsn,
+		*records[6].metadata.lsn, *records[8].metadata.lsn, *records[10].metadata.lsn,
 	}
 
 	reader, err := recovery_log.CreateLogReaderAtEnd()
@@ -378,5 +378,86 @@ func TestLogFindUndo(t *testing.T) {
 		if expected[idx] != *metadata.lsn {
 			t.Fatalf("Undo LSNS does not match")
 		}
+	}
+}
+
+func TestLogRecovery(t *testing.T) {
+	ClearLog()
+	_, t1, t2, hf, bp, tid := makeTestVars()
+
+	// Make sure that we have a page 0 of the heapfile
+	bp.BeginTransaction(tid)
+	hf.insertTuple(&t1, tid)
+	bp.CommitTransaction(tid)
+	bp.FlushAllPages()
+
+	log, err := newLog(TestingFileLog)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	hf_name, err := hf.GetFilename()
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	tid1 := NewTID()
+	tid2 := NewTID()
+	tid3 := NewTID()
+
+	records := [...]*LogRecord{
+		BeginTransactionLog(tid1),
+		InsertLog(hf_name, tid1, PositionDescriptor{0, 0}, &t1),
+		InsertLog(hf_name, tid1, PositionDescriptor{0, 1}, &t2),
+		BeginTransactionLog(tid3),
+		InsertLog(hf_name, tid1, PositionDescriptor{0, 2}, &t2),
+		BeginTransactionLog(tid2),
+		InsertLog(hf_name, tid2, PositionDescriptor{0, 3}, &t1),
+		CommitTransactionLog(tid1),
+		InsertLog(hf_name, tid2, PositionDescriptor{0, 1}, &t1),
+		CommitTransactionLog(tid2),
+		InsertLog(hf_name, tid3, PositionDescriptor{0, 4}, &t2),
+	}
+
+	for _, record := range records {
+		err = log.Append(record)
+		if err != nil {
+			t.Fatalf(err.Error())
+		}
+	}
+
+	recovery_log, err := newLog(TestingFileLog)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	hfs := []*HeapFile{hf}
+	recovery_log.Recover(hfs)
+
+	expected := [...]*Tuple{&t1, &t1, &t2, &t1}
+	iter, err := hf.Iterator(NewTID())
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	for _, exp := range expected {
+		fmt.Println(exp)
+		got, err := iter()
+		if err != nil {
+			t.Fatalf(err.Error())
+		}
+
+		if got == nil {
+			t.Fatalf("Ran out of tuples")
+		}
+
+		if !exp.equals(got) {
+			t.Fatalf("Tuple mismatch")
+		}
+	}
+
+	got, err := iter()
+	if got != nil || err != nil {
+		t.Fatalf("More tuples than expected. Error!")
 	}
 }

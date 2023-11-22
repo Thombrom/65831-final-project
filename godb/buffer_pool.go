@@ -45,9 +45,10 @@ func (bp *BufferPool) FlushAllPages() {
 	bp.mutex.Lock()
 	defer bp.mutex.Unlock()
 
-	for _, page := range bp.pages {
+	for hh, page := range bp.pages {
 		dbfile := (*page).getFile()
 		(*dbfile).flushPage(page)
+		delete(bp.pages, hh)
 	}
 }
 

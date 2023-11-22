@@ -230,6 +230,16 @@ func (t *Log) RecoverState() error {
 	return nil
 }
 
+func reverse[T any](s []T) []T {
+	rev := make([]T, 0)
+
+	for i := len(s) - 1; i >= 0; i-- {
+		rev = append(rev, s[i])
+	}
+
+	return rev
+}
+
 // Returns a list of offsets into the log which should be redone
 // These are records with the same heaphash as the ones found in
 // the dirty pages table after recovering state
@@ -277,7 +287,7 @@ func (t *Log) get_redo_record_offsets() ([]int64, error) {
 		}
 	}
 
-	return result, nil
+	return reverse(result), nil
 }
 
 // Returns a list of all the records that need to be undone.
@@ -327,6 +337,119 @@ func (t *Log) recovery_abort_lost_transactions() error {
 		if err != nil {
 			return err
 		}
+	}
+
+	return nil
+}
+
+// Main recovery function. This should be called on the log right after
+// creating it, taking as input all the heappages
+func (t *Log) Recover(heapfiles []*HeapFile) error {
+	filename_mapping := make(map[string]*HeapFile)
+	for _, file := range heapfiles {
+		filename, err := file.GetFilename()
+		if err != nil {
+			return err
+		}
+
+		filename_mapping[filename] = file
+	}
+
+	// First we recover state
+	t.RecoverState()
+
+	// Then we redo all nessecary changes
+	redo_offsets, err := t.get_redo_record_offsets()
+	if err != nil {
+		return err
+	}
+
+	reader, err := t.CreateLogReaderAtCheckpoint()
+	if err != nil {
+		return err
+	}
+
+	for _, offset := range redo_offsets {
+		reader.SetOffset(offset)
+		metadata, err := reader.ReadMetadata()
+		if err != nil {
+			return err
+		}
+
+		file, ok := filename_mapping[metadata.hh.FileName]
+		if !ok {
+			return fmt.Errorf("Unknown filename %s", metadata.hh.FileName)
+		}
+
+		logrecord, err := reader.ReadLogRecord(file.Descriptor())
+		if err != nil {
+			return err
+		}
+
+		page, err := file.readPage(metadata.hh.PageNo)
+		if err != nil {
+			return err
+		}
+
+		heappage := (*page).(*heapPage)
+		fmt.Println("Inserting ", logrecord.redo.tuple, " into ", metadata.hh.FileName, " on page ", metadata.hh.PageNo, " in slot ", logrecord.redo.pd.SlotNo)
+		heappage.insertTupleAt(logrecord.redo.tuple, int(logrecord.redo.pd.SlotNo))
+		file.flushPage(page)
+	}
+
+	// Now we undo actions
+	undo_offsets, err := t.get_undo_record_offsets()
+	if err != nil {
+		return err
+	}
+
+	for _, offset := range undo_offsets {
+		reader.SetOffset(offset)
+
+		metadata, err := reader.ReadMetadata()
+		if err != nil {
+			return err
+		}
+
+		file, ok := filename_mapping[metadata.hh.FileName]
+		if !ok {
+			return fmt.Errorf("Unknown filename %s", metadata.hh.FileName)
+		}
+
+		logrecord, err := reader.ReadLogRecord(file.Descriptor())
+		if err != nil {
+			return err
+		}
+
+		page, err := file.readPage(metadata.hh.PageNo)
+		if err != nil {
+			return err
+		}
+
+		heappage := (*page).(*heapPage)
+		fmt.Println("Inserting ", logrecord.undo.tuple, " into ", metadata.hh.FileName, " on page ", metadata.hh.PageNo, " in slot ", logrecord.redo.pd.SlotNo)
+		heappage.insertTupleAt(logrecord.undo.tuple, int(logrecord.redo.pd.SlotNo))
+		err = file.flushPage(page)
+		if err != nil {
+			return err
+		}
+
+	}
+
+	// Abort all rolled back transactions
+	for tid := range t.transaction_table {
+		t.Append(AbortTransactionLog(&tid))
+	}
+
+	// We have aborted all existing transactions at the time of the crash
+	// and we have flushed all recovered state to disc, thus we can clear
+	// the datastructures
+	for hh := range t.dirty_page_table {
+		delete(t.dirty_page_table, hh)
+	}
+
+	for k := range t.transaction_table {
+		delete(t.transaction_table, k)
 	}
 
 	return nil

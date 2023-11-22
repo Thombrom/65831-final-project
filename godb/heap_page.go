@@ -88,6 +88,15 @@ func (h *heapPage) insertTuple(t *Tuple) (recordID, error) {
 	return 0, GoDBError{PageFullError, fmt.Sprintf("Could not insert tuple, page already full")}
 }
 
+// Inserts a tuple at a particular location in the heap page. This will overwrite a tuple if
+// it already exists there. This can also be used to unset tuples. Used primarily for recovery
+func (h *heapPage) insertTupleAt(t *Tuple, slotNo int) {
+	h.tuples[slotNo] = t
+	if t != nil {
+		t.Rid = RId{pageNo: h.pageNo, slotNo: slotNo}
+	}
+}
+
 // Delete the tuple in the specified slot number, or return an error if
 // the slot is invalid
 func (h *heapPage) deleteTuple(rid recordID) error {

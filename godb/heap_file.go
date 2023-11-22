@@ -46,6 +46,15 @@ func NewHeapFile(fromFile string, td *TupleDesc, bp *BufferPool) (*HeapFile, err
 	return &HeapFile{bufPool: bp, file: file, desc: td, fileContinuous: false}, nil //replace me
 }
 
+func (f *HeapFile) GetFilename() (string, error) {
+	stat, err := f.file.Stat()
+	if err != nil {
+		return "", err
+	}
+
+	return stat.Name(), nil
+}
+
 // Return the number of pages in the heap file
 func (f *HeapFile) NumPages() int {
 	info, err := f.file.Stat()
