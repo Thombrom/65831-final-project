@@ -16,7 +16,7 @@ import (
 // calling NewHeapFile.
 func computeFieldSum(fileName string, td TupleDesc, sumField string) (int, error) {
 	os.Remove("lab1query.dat")
-	bp := NewBufferPool(16)
+	bp := NewBufferPool(16, "")
 	heap_file, err := NewHeapFile("lab1query.dat", &td, bp)
 	if err != nil {
 		return 0, err

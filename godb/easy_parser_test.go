@@ -61,7 +61,7 @@ func TestParseEasy(t *testing.T) {
 	save := false        //set save to true to save the output of the current test run as the correct answer
 	printOutput := false //print the result set during testing
 
-	bp := NewBufferPool(10)
+	bp := NewBufferPool(10, "")
 	err := MakeTestDatabaseEasy(bp)
 	if err != nil {
 		t.Errorf("failed to create test database, %s", err.Error())

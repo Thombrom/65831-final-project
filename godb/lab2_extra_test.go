@@ -34,7 +34,7 @@ func makeJoinOrderingVars() (*HeapFile, *HeapFile, Tuple, Tuple, *BufferPool) {
 			IntField{25},
 		}}
 
-	bp := NewBufferPool(3)
+	bp := NewBufferPool(3, "")
 	os.Remove(TestingFile)
 	hf1, err := NewHeapFile(TestingFile, &td1, bp)
 	if err != nil {
@@ -67,7 +67,7 @@ func makeOrderByOrderingVars() (*HeapFile, Tuple, TupleDesc, *BufferPool) {
 			IntField{5},
 		}}
 
-	bp := NewBufferPool(3)
+	bp := NewBufferPool(3, "")
 	os.Remove(TestingFile)
 	hf, err := NewHeapFile(TestingFile, &td, bp)
 	if err != nil {

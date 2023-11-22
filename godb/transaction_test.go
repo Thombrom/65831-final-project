@@ -88,7 +88,7 @@ done:
 func TestTransactions(t *testing.T) {
 
 	_, t1, t2, _, _, _ := makeTestVars()
-	bp := NewBufferPool(20)
+	bp := NewBufferPool(20, "")
 	tid := NewTID()
 	bp.BeginTransaction(tid)
 	hf, _ := NewHeapFile(TestingFile, &t1.Desc, bp)

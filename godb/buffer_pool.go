@@ -27,7 +27,9 @@ const (
 )
 
 type BufferPool struct {
-	mutex    sync.Mutex
+	mutex sync.Mutex
+	log   *Log
+
 	locks    map[heapHash]map[TransactionID]LockType
 	waitfor  map[TransactionID]map[TransactionID]bool // A transaction can wait for multiple others (think acquire write lock when multiple has read locks)
 	pages    map[heapHash]*Page
@@ -35,8 +37,28 @@ type BufferPool struct {
 }
 
 // Create a new BufferPool with the specified number of pages
-func NewBufferPool(numPages int) *BufferPool {
-	return &BufferPool{pages: make(map[heapHash]*Page, 0), locks: make(map[heapHash]map[TransactionID]LockType, 0), numPages: numPages, waitfor: make(map[TransactionID]map[TransactionID]bool, 0)}
+func NewBufferPool(numPages int, log_fromfile string) *BufferPool {
+	var log *Log
+
+	if len(log_fromfile) != 0 {
+		log, _ = newLog(log_fromfile)
+	}
+
+	return &BufferPool{
+		log:      log,
+		pages:    make(map[heapHash]*Page, 0),
+		locks:    make(map[heapHash]map[TransactionID]LockType, 0),
+		numPages: numPages,
+		waitfor:  make(map[TransactionID]map[TransactionID]bool, 0),
+	}
+}
+
+func (bp *BufferPool) appendLog(record *LogRecord) error {
+	if bp.log != nil {
+		return bp.log.Append(record)
+	}
+
+	return nil
 }
 
 // Testing method -- iterate through all pages in the buffer pool
@@ -100,6 +122,7 @@ func (bp *BufferPool) FinishTransaction(tid TransactionID, commit bool) {
 // of the pages tid has dirtired will be on disk so it is sufficient to just
 // release locks to abort. You do not need to implement this for lab 1.
 func (bp *BufferPool) AbortTransaction(tid TransactionID) {
+	bp.appendLog(AbortTransactionLog(tid))
 	bp.FinishTransaction(tid, false)
 }
 
@@ -109,10 +132,12 @@ func (bp *BufferPool) AbortTransaction(tid TransactionID) {
 // that the system will not crash while doing this, allowing us to avoid using a
 // WAL. You do not need to implement this for lab 1.
 func (bp *BufferPool) CommitTransaction(tid TransactionID) {
+	bp.appendLog(CommitTransactionLog(tid))
 	bp.FinishTransaction(tid, true)
 }
 
 func (bp *BufferPool) BeginTransaction(tid TransactionID) error {
+	bp.appendLog(BeginTransactionLog(tid))
 	return nil
 }
 

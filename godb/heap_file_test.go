@@ -28,7 +28,7 @@ func makeTestVars() (TupleDesc, Tuple, Tuple, *HeapFile, *BufferPool, Transactio
 			IntField{999},
 		}}
 
-	bp := NewBufferPool(3)
+	bp := NewBufferPool(3, "")
 	os.Remove(TestingFile)
 	hf, err := NewHeapFile(TestingFile, &td, bp)
 	if err != nil {
@@ -118,7 +118,7 @@ func testSerializeN(t *testing.T, n int) {
 
 	}
 	bp.FlushAllPages()
-	bp2 := NewBufferPool(1)
+	bp2 := NewBufferPool(1, "")
 	hf2, _ := NewHeapFile(TestingFile, &td, bp2)
 	tid := NewTID()
 	bp2.BeginTransaction(tid)

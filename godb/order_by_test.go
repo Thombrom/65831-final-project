@@ -104,7 +104,7 @@ func TestMultiFieldOrderBy(t *testing.T) {
 		Rid:    nil,
 	}
 
-	bp := NewBufferPool(2)
+	bp := NewBufferPool(2, "")
 	os.Remove(TestingFile)
 	hf, err := NewHeapFile(TestingFile, &td, bp)
 	if err != nil {

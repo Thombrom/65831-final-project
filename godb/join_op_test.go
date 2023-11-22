@@ -82,7 +82,7 @@ func TestBigJoinOptional(t *testing.T) {
 
 	go func() {
 		ntups := 314159
-		bp := NewBufferPool(100)
+		bp := NewBufferPool(100, "")
 		td := TupleDesc{[]FieldType{{"name", "", IntType}}}
 		os.Remove(BigJoinFile1)
 		os.Remove(BigJoinFile2)

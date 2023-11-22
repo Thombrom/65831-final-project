@@ -208,6 +208,20 @@ func (f *HeapFile) insertTuple(t *Tuple, tid TransactionID) error {
 			continue
 		}
 
+		// Record in the log
+		filename, err := f.GetFilename()
+		if err != nil {
+			// Delete it again and return the error
+			heap_page.deleteTuple(t)
+			return err
+		}
+		err = f.bufPool.appendLog(InsertLog(filename, tid, PositionDescriptor{int64(heap_page.pageNo), int64(t.Rid.(RId).slotNo)}, t))
+		if err != nil {
+			// Delete it again and return the error
+			heap_page.deleteTuple(t)
+			return err
+		}
+
 		// We have inserted into the page so we set dirty
 		return nil
 	}
@@ -263,6 +277,21 @@ func (f *HeapFile) deleteTuple(t *Tuple, tid TransactionID) error {
 	heap_page := (*page).(*heapPage)
 	err = heap_page.deleteTuple(rid)
 	if err != nil {
+		return err
+	}
+
+	// Record in log
+	filename, err := f.GetFilename()
+	if err != nil {
+		// Reinsert it if we encounter an error
+		heap_page.insertTupleAt(t, rid.slotNo)
+		return err
+	}
+
+	err = f.bufPool.appendLog(DeleteLog(filename, tid, PositionDescriptor{int64(rid.pageNo), int64(rid.slotNo)}, t))
+	if err != nil {
+		// Reinsert it if we encounter an error
+		heap_page.insertTupleAt(t, rid.slotNo)
 		return err
 	}
 
