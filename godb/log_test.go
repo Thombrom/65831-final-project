@@ -461,3 +461,80 @@ func TestLogRecovery(t *testing.T) {
 		t.Fatalf("More tuples than expected. Error!")
 	}
 }
+
+func TestLogTransactions(t *testing.T) {
+	ClearLog()
+	td, t1, t2, _, _, _ := makeTestVars()
+	bp := NewBufferPool(3, TestingFileLog)
+
+	hf, err := NewHeapFile("table.dat", &td, bp)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	tid := NewTID()
+	bp.BeginTransaction(tid)
+	hf.insertTuple(&t1, tid)
+	hf.insertTuple(&t2, tid)
+	hf.deleteTuple(&t2, tid)
+	bp.CommitTransaction(tid)
+	fmt.Println("After commit")
+
+	log, err := newLog(TestingFileLog)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	reader, err := log.CreateLogReaderAtCheckpoint()
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+	records := make([]*LogRecord, 0)
+
+	for !reader.AtEnd() {
+		record, err := reader.ReadLogRecord(&td)
+		fmt.Println(record)
+		if err != nil {
+			t.Fatalf(err.Error())
+		}
+
+		records = append(records, record)
+		reader.AdvanceNext()
+	}
+
+	if len(records) != 5 {
+		t.Fatal("Unexpected number of log records")
+	}
+
+	expected_ops := [...]int{LogBeginTransaction, LogInsertDelete, LogInsertDelete, LogInsertDelete, LogCommitTransaction}
+
+	for idx, record := range records {
+		if record.metadata.optype != OperationType(expected_ops[idx]) {
+			t.Fatal("Unexpected operation type")
+		}
+	}
+
+	if !records[1].redo.equals(&LogOperation{true, &t1, PositionDescriptor{0, int64(t1.Rid.(RId).slotNo)}}) {
+		t.Fatalf("Wrong redo")
+	}
+
+	if !records[2].redo.equals(&LogOperation{true, &t2, PositionDescriptor{0, int64(t2.Rid.(RId).slotNo)}}) {
+		t.Fatalf("Wrong redo")
+	}
+
+	if !records[3].redo.equals(&LogOperation{false, nil, PositionDescriptor{0, int64(t2.Rid.(RId).slotNo)}}) {
+		t.Fatalf("Wrong redo")
+	}
+
+	if !records[1].undo.equals(&LogOperation{false, nil, PositionDescriptor{0, int64(t1.Rid.(RId).slotNo)}}) {
+		t.Fatalf("Wrong undo")
+	}
+
+	if !records[2].undo.equals(&LogOperation{false, nil, PositionDescriptor{0, int64(t2.Rid.(RId).slotNo)}}) {
+		t.Fatalf("Wrong undo")
+	}
+
+	if !records[3].undo.equals(&LogOperation{true, &t2, PositionDescriptor{0, int64(t2.Rid.(RId).slotNo)}}) {
+		t.Fatalf("Wrong undo")
+	}
+}
