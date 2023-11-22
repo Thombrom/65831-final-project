@@ -214,12 +214,17 @@ func (bp *BufferPool) EvictPageL() error {
 		}
 	}
 
-	// We have a buffer pool full of dirty pages, so we delete the first page we come across
-	for k, page := range bp.pages {
-		file := (*page).(*heapPage).getFile()
-		(*file).(*HeapFile).flushPage(page)
-		delete(bp.pages, k)
-		return nil
+	if bp.log != nil {
+
+		// We have a buffer pool full of dirty pages, so we delete the first page we come across
+		// Note that this is only possible because we have the log so we can go back and logically
+		// undo the operations
+		for k, page := range bp.pages {
+			file := (*page).(*heapPage).getFile()
+			(*file).(*HeapFile).flushPage(page)
+			delete(bp.pages, k)
+			return nil
+		}
 	}
 
 	return GoDBError{BufferPoolFullError, fmt.Sprintf("Buffer pool full of dirty pages - cannot evict page")}
