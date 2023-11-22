@@ -462,11 +462,12 @@ func TestLogRecovery(t *testing.T) {
 	}
 }
 
-func TestLogTransactions(t *testing.T) {
+func TestLogTransactionsCommit(t *testing.T) {
 	ClearLog()
 	td, t1, t2, _, _, _ := makeTestVars()
 	bp := NewBufferPool(3, TestingFileLog)
 
+	os.Remove("table.dat")
 	hf, err := NewHeapFile("table.dat", &td, bp)
 	if err != nil {
 		t.Fatalf(err.Error())
@@ -478,7 +479,6 @@ func TestLogTransactions(t *testing.T) {
 	hf.insertTuple(&t2, tid)
 	hf.deleteTuple(&t2, tid)
 	bp.CommitTransaction(tid)
-	fmt.Println("After commit")
 
 	log, err := newLog(TestingFileLog)
 	if err != nil {
@@ -493,7 +493,6 @@ func TestLogTransactions(t *testing.T) {
 
 	for !reader.AtEnd() {
 		record, err := reader.ReadLogRecord(&td)
-		fmt.Println(record)
 		if err != nil {
 			t.Fatalf(err.Error())
 		}
@@ -536,5 +535,118 @@ func TestLogTransactions(t *testing.T) {
 
 	if !records[3].undo.equals(&LogOperation{true, &t2, PositionDescriptor{0, int64(t2.Rid.(RId).slotNo)}}) {
 		t.Fatalf("Wrong undo")
+	}
+}
+
+func TestLogTransactionAbort(t *testing.T) {
+	ClearLog()
+	td, t1, t2, _, _, _ := makeTestVars()
+	bp := NewBufferPool(3, TestingFileLog)
+
+	os.Remove("table.dat")
+	hf, err := NewHeapFile("table.dat", &td, bp)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	tid0 := NewTID()
+	bp.BeginTransaction(tid0)
+	for i := 0; i < 10; i++ {
+		hf.insertTuple(&t1, tid0)
+	}
+	bp.CommitTransaction(tid0)
+
+	tid1 := NewTID()
+	bp.BeginTransaction(tid1)
+	hf.insertTuple(&t1, tid1)
+	hf.insertTuple(&t2, tid1)
+	hf.deleteTuple(&t2, tid1)
+
+	// Now this should edit it internally in the bufferpool
+	bp.FlushAllPages()
+	bp.AbortTransaction(tid1)
+
+	tid2 := NewTID()
+	bp.BeginTransaction(tid2)
+	iter, err := hf.Iterator(tid2)
+
+	collection := make([]*Tuple, 0)
+	for {
+		val, err := iter()
+		if err != nil {
+			t.Fatalf(err.Error())
+		}
+
+		if val == nil {
+			break
+		}
+
+		if !val.equals(&t1) {
+			t.Fatalf("Wrong tuple")
+		}
+
+		collection = append(collection, val)
+	}
+
+	if len(collection) != 10 {
+		t.Fatal("Tuple count mismatch")
+	}
+
+	bp.CommitTransaction(tid2)
+}
+
+func TestLogEvictDirtyPages(t *testing.T) {
+	ClearLog()
+	td, t1, _, _, _, _ := makeTestVars()
+	bp := NewBufferPool(3, TestingFileLog)
+
+	os.Remove("table.dat")
+	hf, err := NewHeapFile("table.dat", &td, bp)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	// Insert 500 tuples. This is enough to fill up the buffer pool
+	// requiring we spill some pages to disk
+	tid0 := NewTID()
+	err = bp.BeginTransaction(tid0)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	for i := 0; i < 500; i++ {
+		err = hf.insertTuple(&t1, tid0)
+		if err != nil {
+			t.Fatal(err.Error())
+		}
+	}
+	bp.CommitTransaction(tid0)
+
+	tid1 := NewTID()
+	iter, err := hf.Iterator(tid1)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	collection := make([]*Tuple, 0)
+	for {
+		val, err := iter()
+		if err != nil {
+			t.Fatalf(err.Error())
+		}
+
+		if val == nil {
+			break
+		}
+
+		if !val.equals(&t1) {
+			t.Fatalf("Wrong tuple")
+		}
+
+		collection = append(collection, val)
+	}
+
+	if len(collection) != 500 {
+		t.Fatalf("Tuple count mismatch %d != %d", len(collection), 500)
 	}
 }

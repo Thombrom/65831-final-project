@@ -27,8 +27,9 @@ const (
 )
 
 type BufferPool struct {
-	mutex sync.Mutex
-	log   *Log
+	mutex              sync.Mutex
+	log                *Log
+	filenames_to_files map[string]*HeapFile
 
 	locks    map[heapHash]map[TransactionID]LockType
 	waitfor  map[TransactionID]map[TransactionID]bool // A transaction can wait for multiple others (think acquire write lock when multiple has read locks)
@@ -45,11 +46,12 @@ func NewBufferPool(numPages int, log_fromfile string) *BufferPool {
 	}
 
 	return &BufferPool{
-		log:      log,
-		pages:    make(map[heapHash]*Page, 0),
-		locks:    make(map[heapHash]map[TransactionID]LockType, 0),
-		numPages: numPages,
-		waitfor:  make(map[TransactionID]map[TransactionID]bool, 0),
+		log:                log,
+		filenames_to_files: make(map[string]*HeapFile),
+		pages:              make(map[heapHash]*Page, 0),
+		locks:              make(map[heapHash]map[TransactionID]LockType, 0),
+		numPages:           numPages,
+		waitfor:            make(map[TransactionID]map[TransactionID]bool, 0),
 	}
 }
 
@@ -74,6 +76,59 @@ func (bp *BufferPool) FlushAllPages() {
 	}
 }
 
+func (bp *BufferPool) UndoTransaction(tid TransactionID) error {
+	reader, err := bp.log.CreateLogReaderAtEnd()
+	if err != nil {
+		return err
+	}
+
+	for !reader.AtStart() {
+		err = reader.AdvancePrev()
+		if err != nil {
+			return err
+		}
+
+		metadata, err := reader.ReadMetadata()
+		if err != nil {
+			return err
+		}
+
+		if *metadata.tid != *tid {
+			continue
+		}
+
+		if metadata.optype == LogBeginTransaction {
+			break
+		}
+
+		if metadata.optype != LogInsertDelete {
+			continue
+		}
+
+		file := bp.filenames_to_files[metadata.hh.FileName]
+		record, err := reader.ReadLogRecord(file.desc)
+
+		// We obviously hold the lock on this page since we were able to edit it
+		// so it should be no problem to edit it here
+		page, ok := bp.pages[record.metadata.hh]
+		if ok {
+			(*page).(*heapPage).insertTupleAt(record.undo.tuple, int(record.undo.pd.SlotNo))
+		} else {
+			page, err = file.readPage(record.metadata.hh.PageNo)
+			if err != nil {
+				return err
+			}
+			(*page).(*heapPage).insertTupleAt(record.undo.tuple, int(record.redo.pd.SlotNo))
+			err = file.flushPage(page)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
 func (bp *BufferPool) FinishTransaction(tid TransactionID, commit bool) {
 	bp.mutex.Lock()
 	defer bp.mutex.Unlock()
@@ -88,18 +143,28 @@ func (bp *BufferPool) FinishTransaction(tid TransactionID, commit bool) {
 
 				// If we commit, we flush the page,
 				// otherwise we delete it from the bp
-				if commit {
-					page, ok := bp.pages[key]
-					if !ok {
-						continue
-					}
+				if bp.log == nil {
+					if commit {
+						page, ok := bp.pages[key]
+						if !ok {
+							continue
+						}
 
-					// Flush page. We can now mark it as non-dirty
-					dbfile := (*page).getFile()
-					(*dbfile).flushPage(page)
-					(*page).setDirty(false)
+						// Flush page. We can now mark it as non-dirty
+						dbfile := (*page).getFile()
+						(*dbfile).flushPage(page)
+						(*page).setDirty(false)
+					} else {
+						delete(bp.pages, key)
+					}
 				} else {
-					delete(bp.pages, key)
+					// If aborting, we need to go back and undo the transaction
+					if !commit {
+						err := bp.UndoTransaction(tid)
+						if err != nil {
+							fmt.Println("!!! Error in undoing transaction !!!")
+						}
+					}
 				}
 
 				if len(page_locks) == 1 {
@@ -147,6 +212,14 @@ func (bp *BufferPool) EvictPageL() error {
 			delete(bp.pages, k)
 			return nil
 		}
+	}
+
+	// We have a buffer pool full of dirty pages, so we delete the first page we come across
+	for k, page := range bp.pages {
+		file := (*page).(*heapPage).getFile()
+		(*file).(*HeapFile).flushPage(page)
+		delete(bp.pages, k)
+		return nil
 	}
 
 	return GoDBError{BufferPoolFullError, fmt.Sprintf("Buffer pool full of dirty pages - cannot evict page")}
@@ -329,6 +402,8 @@ func (bp *BufferPool) GetPage(file DBFile, pageNo int, tid TransactionID, perm R
 	pagekey := file.pageKey(pageNo).(heapHash)
 	bp.mutex.Lock()
 	defer bp.mutex.Unlock()
+	bp.filenames_to_files[pagekey.FileName] = (file).(*HeapFile)
+
 	err := bp.AcquireLockL(pagekey, tid, perm)
 	if err != nil {
 		return nil, err
